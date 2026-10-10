@@ -157,7 +157,10 @@ export function runRealBacktest(
   settings: CarverSettings,
   options: RunBacktestOptions = {}
 ): { series: BacktestDataPoint[]; metrics: BacktestMetrics } {
-  const safeUniverse = (Array.isArray(universe) ? universe : []).filter(Boolean);
+  // 排除合成伪数据标的：其 bars 是前端生成的伪随机 K 线，不能参与回测结论
+  const safeUniverse = (Array.isArray(universe) ? universe : [])
+    .filter(Boolean)
+    .filter((i) => !i.syntheticBars);
   const advCapRatio = options.advCapRatio ?? 0.20;
   const stressLevel = options.stressLevel ?? 'EXTREME_STRESS';
   const minHist = options.minHistoryBars ?? 252;

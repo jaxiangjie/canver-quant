@@ -71,11 +71,14 @@ app.post('/api/ashare/proxy', async (req, res) => {
 });
 
 app.get('/api/health', (_req, res) => {
+  const fallbackCount = instrumentsStore.filter((i: any) => i?.dataSource === 'fallback').length;
   res.json({
     status: 'online',
     system: 'Carver A-Share Quantitative System',
     timestamp: new Date().toISOString(),
     instrumentsCount: instrumentsStore.length,
+    realCount: instrumentsStore.length - fallbackCount,
+    fallbackCount, // 无 parquet、回退合成模板的标的数（>0 表示部分行情并非真实）
     persisted: storePathExists(),
   });
 });
@@ -89,11 +92,19 @@ async function initStore() {
       const real = await loadRealUniverse();
       if (real.length) {
         base = real;
+        // 如实区分真实 parquet 与回退模板：旧实现无论读到什么都打印 "loaded N from parquet"，
+        // 即使 parquet 目录整个不存在也会谎报成功，用户以为在看真实行情。
+        const fb = real.filter((i: any) => i?.dataSource === 'fallback').length;
         console.log(
-          `[real-data] loaded ${real.length} instruments from parquet @ ${
+          `[real-data] loaded ${real.length} instruments from parquet (real=${real.length - fb}, fallback=${fb}) @ ${
             process.env.REAL_DATA_DIR || 'E:/quant-platform/data/parquet/daily'
           }`,
         );
+        if (fb > 0) {
+          console.warn(
+            `[real-data] ${fb} 标的无 parquet 数据，已回退合成模板 —— 这部分行情并非真实，回测结论需谨慎`,
+          );
+        }
       }
     } catch (err: any) {
       console.warn('[real-data] load failed:', err?.message);
@@ -108,8 +119,11 @@ async function initStore() {
   if (process.env.RESET_STORE !== 'true' && storePathExists()) {
     const persisted = loadPersistedStore();
     if (persisted && Array.isArray(persisted.instruments) && persisted.instruments.length) {
-      base = mergeStores(base, persisted.instruments);
-      console.log(`[persistence] merged ${persisted.instruments.length} persisted instruments (savedAt=${persisted.savedAt})`);
+      base = mergeStores(base, persisted.instruments, persisted.deletedCodes || []);
+      console.log(
+        `[persistence] merged ${persisted.instruments.length} persisted instruments (savedAt=${persisted.savedAt}` +
+          `${persisted.deletedCodes?.length ? `, deleted=${persisted.deletedCodes.length}` : ''})`,
+      );
     }
   }
 

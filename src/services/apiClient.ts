@@ -21,7 +21,10 @@ export function hydrateInstrument(raw: any): AShareInstrument {
   const isETF = raw?.isETF ?? (code.startsWith('51') || code.startsWith('15') || code.startsWith('58'));
   const isT0 = raw?.isT0 ?? (code.startsWith('511') || code.startsWith('513') || code.startsWith('518'));
 
-  const bars = Array.isArray(raw?.bars) && raw.bars.length >= 20
+  // bars 不足时会被合成为伪随机 K 线 —— 必须打上 syntheticBars 标记，
+  // 否则这些假数据会静默进入回测与相关性计算（历史 P0 问题）。
+  const hasRealBars = Array.isArray(raw?.bars) && raw.bars.length >= 20;
+  const bars = hasRealBars
     ? raw.bars
     : generateHistoricalBars(currentPrice, annualizedVol, 0.05, 'oscillator');
 
@@ -47,6 +50,8 @@ export function hydrateInstrument(raw: any): AShareInstrument {
     pePercentile: Number(raw?.pePercentile ?? (raw?.category === 'bond_etf' || raw?.category === 'commodity_etf' ? 50 : 35)),
     pbPercentile: Number(raw?.pbPercentile ?? (raw?.category === 'bond_etf' || raw?.category === 'commodity_etf' ? 50 : 30)),
     bars,
+    syntheticBars: !hasRealBars,
+    dataSource: raw?.dataSource ?? (hasRealBars ? 'parquet' : 'manual'),
   };
 }
 

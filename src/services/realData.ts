@@ -65,6 +65,7 @@ async function readRows(code: string): Promise<RawRow[]> {
 
 export async function loadRealUniverse(): Promise<AShareInstrument[]> {
   const out: AShareInstrument[] = [];
+  let fallbackCount = 0; // 无 parquet、回退合成模板的标的数（用于暴露真实数据覆盖率，避免谎报成功）
   for (const tpl of INITIAL_INSTRUMENTS) {
     const code = stripSuffix(tpl.code);
     let rows: RawRow[] = [];
@@ -74,8 +75,10 @@ export async function loadRealUniverse(): Promise<AShareInstrument[]> {
       console.warn(`[real-data] read ${code} failed:`, (e as Error).message);
     }
     if (!rows.length) {
-      // 该标的无 parquet 时回退 mock 模板，保证工作台不崩
-      out.push(tpl);
+      // 该标的无 parquet 时回退 mock 模板，保证工作台不崩；
+      // 必须打上 fallback 标记，否则会被误当作真实行情参与回测与相关性计算。
+      out.push({ ...tpl, dataSource: 'fallback' });
+      fallbackCount++;
       continue;
     }
     // parquetReadObjects 返回的 date 是 Date 对象（非字符串），必须按时间戳排序，
@@ -169,7 +172,13 @@ export async function loadRealUniverse(): Promise<AShareInstrument[]> {
       dailyATR,
       annualizedVol,
       bars,
+      dataSource: 'parquet',
     });
+  }
+  if (fallbackCount > 0) {
+    console.warn(
+      `[real-data] ${fallbackCount}/${out.length} 标的无 parquet 数据，已回退合成模板（非真实行情）`,
+    );
   }
   return out;
 }

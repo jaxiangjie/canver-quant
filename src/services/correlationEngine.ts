@@ -154,7 +154,10 @@ export function computeUniverseCorrelationMatrix(
   universe: AShareInstrument[],
   lookbackDays: number = 60
 ): UniverseCorrelationResult {
-  const safeUniverse = Array.isArray(universe) ? universe.filter(Boolean) : [];
+  // 排除合成伪数据标的，避免假 K 线影响相关性与 IDM
+  const safeUniverse = Array.isArray(universe)
+    ? universe.filter(Boolean).filter((i) => !i.syntheticBars)
+    : [];
   const n = safeUniverse.length;
 
   if (n === 0) {

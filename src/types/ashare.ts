@@ -40,6 +40,8 @@ export interface AShareInstrument {
   changePct: number;
   dailyATR: number;     // 20日ATR (绝对价格波幅)
   annualizedVol: number;// 20日年化波动率 (例如 0.18 = 18%)
+  dataSource?: 'parquet' | 'fallback' | 'manual'; // 数据来源：parquet 真实行情 / 无数据回退模板 / 用户自定义
+  syntheticBars?: boolean;  // bars 是否为合成的伪数据（无真实行情源）；回测与相关性计算应排除此类标的
   riskBudgetWeight: number; // 目标风险预算权重 (0 - 1)
   currentShares: number;// 当前实际持有股数 (手数为 currentShares / 100)
   premiumDiscountRate?: number; // ETF二级市场折溢价率 (%)
