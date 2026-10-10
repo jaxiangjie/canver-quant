@@ -104,8 +104,10 @@ function computeMetrics(equity: number[]): StrategyMetrics {
     if (dd < maxDD) maxDD = dd;
   }
 
-  const downside = daily.filter(r => r < 0);
-  const downStd = downside.length ? std(downside) * Math.sqrt(TRADING_DAYS) : 0;
+  // 下行标准差：标准半方差 sqrt( Σ min(r,0)^2 / N )，分母用全部样本数 N。
+  // 旧实现取「负收益子集的 std」：等幅下跌时该子集 std=0 → Sortino=0，完全失真。
+  const downsideSq = daily.reduce((a, r) => a + Math.min(0, r) ** 2, 0);
+  const downStd = daily.length > 0 ? Math.sqrt(downsideSq / daily.length) * Math.sqrt(TRADING_DAYS) : 0;
 
   const annRetPct = cagr * 100;
   const sharpe = annVol > 0 ? (annRetPct - RISK_FREE * 100) / (annVol * 100) : 0;
@@ -239,7 +241,13 @@ export function runRealBacktest(
         const bar = inst.bars[len - 1];
         prices.set(inst.code, bar.close);
         const recent = inst.bars.slice(Math.max(0, len - 5), len);
-        const adv = recent.reduce((a, b) => a + (b.turnover || 0) * 10000, 0) / Math.max(1, recent.length);
+        // ADV 用真实成交额 (元)：优先 bar.amount，缺失才退回 turnover(万元)×10000。
+        // 旧实现直接用合成并取整的 turnover×10000，早期小成交额样本会得到 0
+        // → participation=1 → 恒定 45bps 冲击，使流动性保护结论失真。
+        const adv = recent.reduce(
+          (a, b) => a + (Number(b.amount) > 0 ? Number(b.amount) : (b.turnover || 0) * 10000),
+          0,
+        ) / Math.max(1, recent.length);
         advMap.set(inst.code, adv);
       }
     });
@@ -262,7 +270,15 @@ export function runRealBacktest(
       // --- 卡弗策略目标持仓 ---
       const { positions } = calculatePortfolio(snapshot, settings);
       const targetCarver = new Map<string, number>();
-      positions.forEach(p => targetCarver.set(p.instrument.code, p.targetShares));
+      // 缓冲带（12% 死区）必须在回测中生效：落在死区内则维持当前持仓、不调仓。
+      // 旧实现直接取 targetShares，导致每次再平衡都全量换仓，
+      // 系统性放大换手与成本，且与 UI「建议执行股数」口径不一致。
+      positions.forEach(p =>
+        targetCarver.set(
+          p.instrument.code,
+          p.withinBuffer ? (p.currentShares || 0) : p.targetShares,
+        ),
+      );
 
       // --- 等权重目标持仓（仅在已激活标的中均分）---
       const nActive = snapshot.length;

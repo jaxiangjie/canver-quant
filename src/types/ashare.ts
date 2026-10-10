@@ -18,7 +18,8 @@ export interface AShareBar {
   close: number;
   preClose?: number;
   volume: number;       // 成交量 (手)
-  turnover: number;     // 成交额 (万元)
+  turnover: number;     // 成交额 (万元，展示用)
+  amount?: number;      // 真实成交额 (元)，优先用于 ADV / 市场冲击成本计算
   changePct: number;    // 涨跌幅 (%)
   ma20?: number;
   ma60?: number;

@@ -89,8 +89,11 @@ export async function loadRealUniverse(): Promise<AShareInstrument[]> {
     const closes = rows.map((r) => Number(r.close));
 
     // 年化波动率 = 日收益率样本标准差 × √250
+    // 仅取最近 120 个交易日收益（与回测 buildSnapshot 的 120 日窗口口径一致）；
+    // 若用全样本（可能十年），定仓会严重偏离近期波动状态。
+    const retStart = Math.max(1, n - 121);
     const rets: number[] = [];
-    for (let i = 1; i < n; i++) rets.push((closes[i] - closes[i - 1]) / closes[i - 1]);
+    for (let i = retStart; i < n; i++) rets.push((closes[i] - closes[i - 1]) / closes[i - 1]);
     const annualizedVol =
       Number((stdSample(rets) * Math.sqrt(250)).toFixed(4)) || tpl.annualizedVol;
 
@@ -128,6 +131,7 @@ export async function loadRealUniverse(): Promise<AShareInstrument[]> {
       const low = Number(r.low);
       const vol = Number(r.volume);
       const pc = i > 0 ? Number(rows[i - 1].close) : close;
+      const amt = Number(r.amount) > 0 ? Number(r.amount) : vol * close; // 真实成交额 (元)
       return {
         tradeDate: normDate(r.date),
         open,
@@ -136,8 +140,10 @@ export async function loadRealUniverse(): Promise<AShareInstrument[]> {
         close,
         preClose: pc,
         volume: vol,
-        // turnover 仅作展示，按 成交量×收盘价/100 近似为"万元"
-        turnover: Number(((vol * close) / 100).toFixed(0)),
+        amount: amt,
+        // turnover 仅作展示 (万元)，由真实成交额换算
+        // （旧实现用合成的 成交量×价/100 并四舍五入，早期小成交额样本会被取整为 0）
+        turnover: Number((amt / 10000).toFixed(0)),
         changePct: Number((((close - pc) / pc) * 100).toFixed(2)),
         ma20:
           i >= 19

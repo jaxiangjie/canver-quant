@@ -125,6 +125,29 @@ export function computeCarverIDM(n: number, avgCorrelation: number): number {
 }
 
 /**
+ * 按交易日对齐后计算两组收益序列的相关性。
+ * 旧实现直接按下标配对：任一标的停牌 / 缺日都会让两条序列错位，
+ * 极端时会算出虚假的负相关，使 IDM 失真。这里先取日期交集再算。
+ */
+function correlationAlignedByDate(
+  a: { date: string; ret: number }[],
+  b: { date: string; ret: number }[],
+): number {
+  if (!a.length || !b.length) return 0;
+  const mapB = new Map(b.map((x) => [x.date, x.ret]));
+  const xs: number[] = [];
+  const ys: number[] = [];
+  for (const x of a) {
+    const y = mapB.get(x.date);
+    if (y !== undefined) {
+      xs.push(x.ret);
+      ys.push(y);
+    }
+  }
+  return calculatePearsonCorrelation(xs, ys);
+}
+
+/**
  * 计算 Universe 内所有标的在过去 lookbackDays (默认 60 天) 的相关性矩阵及互补性优化指标
  */
 export function computeUniverseCorrelationMatrix(
@@ -147,13 +170,13 @@ export function computeUniverseCorrelationMatrix(
     };
   }
 
-  // 1. 提取所有标的过去 60 天对数收益序列
-  const seriesMap: { [id: string]: number[] } = {};
+  // 1. 提取所有标的过去 60 天对数收益序列（保留日期，供按交易日对齐）
+  const seriesMap: { [id: string]: { date: string; ret: number }[] } = {};
   let commonDates: string[] = [];
 
   safeUniverse.forEach(inst => {
     const { returns, dates } = extractDailyReturns(inst, lookbackDays);
-    seriesMap[inst.id] = returns;
+    seriesMap[inst.id] = returns.map((r, i) => ({ date: dates[i], ret: r }));
     if (dates.length > commonDates.length) {
       commonDates = dates;
     }
@@ -174,7 +197,7 @@ export function computeUniverseCorrelationMatrix(
       } else if (i < j) {
         const instI = safeUniverse[i];
         const instJ = safeUniverse[j];
-        const r = calculatePearsonCorrelation(seriesMap[instI.id] || [], seriesMap[instJ.id] || []);
+        const r = correlationAlignedByDate(seriesMap[instI.id] || [], seriesMap[instJ.id] || []);
         matrix[i][j] = r;
         matrix[j][i] = r;
         allOffDiagonalCorrs.push(r);
