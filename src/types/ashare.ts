@@ -1,0 +1,226 @@
+/**
+ * A-Share & ETF Systematic Trading Types (Robert Carver Framework)
+ */
+
+export type AssetCategory = 
+  | 'broad_etf'       // 宽基指数ETF (如 510300 沪深300, 510500 中证500, 588000 科创50, 159915 创业板)
+  | 'sector_etf'      // 行业/主题ETF (如 512890 红利低波, 512480 半导体)
+  | 'bond_etf'        // 债券/固收ETF (如 511010 国债ETF, 511090 30年国债ETF)
+  | 'commodity_etf'   // 大宗/黄金ETF (如 518880 黄金ETF)
+  | 'qdii_etf'        // 跨境QDII ETF (如 513100 纳指ETF, 513050 中概互联)
+  | 'stock_cn';       // A股个股 (如 600519 贵州茅台, 300750 宁德时代)
+
+export interface AShareBar {
+  tradeDate: string;    // YYYY-MM-DD
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  preClose?: number;
+  volume: number;       // 成交量 (手)
+  turnover: number;     // 成交额 (万元)
+  changePct: number;    // 涨跌幅 (%)
+  ma20?: number;
+  ma60?: number;
+  ma250?: number;
+  atr20?: number;
+}
+
+export interface AShareInstrument {
+  id: string;
+  code: string;         // 如 "510300.SH" 或 "600519.SH"
+  name: string;
+  category: AssetCategory;
+  isETF: boolean;
+  isT0: boolean;         // 是否支持T+0 (跨境QDII、黄金、债券ETF支持)
+  stampDutyExempt: boolean; // 是否免印花税 (ETF为true免税，个股为false征收千分之0.5)
+  currentPrice: number;
+  preClose: number;
+  changePct: number;
+  dailyATR: number;     // 20日ATR (绝对价格波幅)
+  annualizedVol: number;// 20日年化波动率 (例如 0.18 = 18%)
+  riskBudgetWeight: number; // 目标风险预算权重 (0 - 1)
+  currentShares: number;// 当前实际持有股数 (手数为 currentShares / 100)
+  premiumDiscountRate?: number; // ETF二级市场折溢价率 (%)
+  dividendYield?: number;       // 股息率 (%)
+  peTTM?: number;               // 滚动市盈率 (PE-TTM)
+  pb?: number;                  // 市净率 (PB)
+  pePercentile?: number;        // PE历史百分位 (0 - 100%)
+  pbPercentile?: number;        // PB历史百分位 (0 - 100%)
+  bars: AShareBar[];    // 历史日线
+}
+
+export interface HistoricalValuationPoint {
+  date: string;
+  pe: number;
+  pb: number;
+  pePercentile: number;
+  pbPercentile: number;
+  compositePercentile: number;
+}
+
+export interface ValuationPercentileSignal {
+  peTTM: number;
+  pb: number;
+  pePercentile: number;
+  pbPercentile: number;
+  compositePercentile: number;
+  valuationZone: 'EXTREME_LOW' | 'UNDERVALUED' | 'FAIR' | 'OVERVALUED' | 'EXTREME_HIGH';
+  zoneLabel: string;
+  positionAdjustmentSuggestion: string;
+  positionMultiplier: number; // 仓位调整系数，如 1.2x 溢价 或 0.8x 折价
+  history5y: HistoricalValuationPoint[]; // 过去5年历史估值百分位序列
+}
+
+export interface EWMACSignal {
+  fastSpan: number;
+  slowSpan: number;
+  rawDiff: number;
+  scaledScalar: number; // -20 到 +20
+}
+
+export interface StrategySignals {
+  ewmacFastSlow: {
+    ewmac8_32: number;
+    ewmac16_64: number;
+    ewmac32_128: number;
+    compositeScalar: number; // -20 到 +20 卡弗预测标量
+  };
+  absoluteMomentumPass: boolean; // 是否站上250日年线 (防熊市绝对动量过滤)
+  relativeStrengthRank: number;  // 全市场相对强弱分位数 (0 - 100)
+  dividendRankScore?: number;    // 红利安全边际分 (0 - 100)
+  valuationSignal: ValuationPercentileSignal; // 滚动市盈率PE与市净率PB估值百分位
+  liquidityState: 'NORMAL' | 'CAUTION_T1' | 'LIMIT_DOWN_RISK'; // 流动性评级
+  finalForecastScalar: number;   // 综合卡弗标量 ( -20 到 +20 )
+}
+
+export interface CarverSettings {
+  totalCapital: number;          // 初始资金，默认 1,000,000 元
+  targetAnnualVol: number;       // 目标年化波动率，默认 0.12 (12%)
+  bufferThreshold: number;       // 调仓死区缓冲比例，默认 0.12 (12%)
+  maxInstrumentRiskCap: number;  // 单标的风险敞口上限，默认 0.25 (25%)
+  maxLeverage: number;           // 最大允许杠杆率上限，默认 0.20 (20% 杠杆，即组合总市值最多 120% / 1.20x)
+  maxInstrumentPositionCap: number; // 单标的最高资金占比上限，默认 0.25 (25%)
+  maxBondCap?: number;           // 债券资产总额/单标的上限，默认 0.20 (20%，防止超低波债券过度占用资金拖累年化)
+  useIDM?: boolean;              // 是否启用卡弗标的分散化乘数 (Instrument Diversification Multiplier)，解决多标的低波导致的年化偏低问题
+  idmMode?: 'auto' | 'manual';   // IDM 设置模式：'auto' (根据相关性矩阵自动计算) 或 'manual' (用户手动指定)
+  manualIDM?: number;            // 手动指定的分散化乘数 (推荐区间 1.20 - 1.80)
+  maxIDM?: number;               // IDM 放大倍数上限，默认 1.80
+  useERPTilt?: boolean;          // 是否启用 A股股债收益差 (ERP/Fed模型) 逆向战术偏置
+  stockCommissionRate: number;   // 股票交易佣金率，默认 0.00025 (万2.5)
+  etfCommissionRate: number;     // ETF交易佣金率，默认 0.0001 (万1)
+  stockStampDuty: number;        // 股票卖出印花税，默认 0.0005 (千0.5)
+  slippageBps: number;           // 滑点基点，默认 5 bps
+}
+
+export interface PositionCalculation {
+  instrument: AShareInstrument;
+  currentShares: number;
+  currentValue: number;
+  currentWeight: number;
+  
+  // 卡弗波动率计算
+  dailyInstrumentVol: number;   // 单股日波动率 (元)
+  dailyCashRisk: number;        // 每日现金风险预算 (元)
+  basePositionShares: number;   // 基准股数 (未加标量)
+  
+  // 预测标量与目标计算
+  forecastScalar: number;       // -20 到 +20
+  scalarMultiplier: number;     // 放大/防御倍数 (例如 0.5x ~ 1.8x)
+  rawTargetShares: number;      // 理论浮点目标股数
+  targetShares: number;         // A股向下取整到100股 (整手)
+  targetCapital: number;        // 目标配置金额
+  targetWeight: number;         // 目标总资金占比
+  
+  // 调仓与缓冲带判断
+  shareDelta: number;           // 需买入(+)或卖出(-)股数
+  capitalDelta: number;         // 变动资金额
+  withinBuffer: boolean;        // 是否落在缓冲带内 (无需调仓)
+  action: 'BUY' | 'SELL' | 'HOLD';
+  recommendedShares: number;    // 经缓冲过滤后的最终建议执行股数 (必须是100整倍数)
+  estimatedFee: number;         // 预估交易手续费与税费
+}
+
+export interface PortfolioSummaryStats {
+  totalCapital: number;
+  currentEquityValue: number;
+  cashBalance: number;
+  equityRatio: number;          // 当前持仓总仓位占比 (%)
+  targetEquityValue: number;    // 目标总持仓市值 (元)
+  targetLeverageRatio: number;  // 目标总仓位率 (%)
+  targetLeveragePct: number;    // 目标净杠杆率 (%) = Math.max(0, targetLeverageRatio - 100)
+  maxLeverageLimitPct: number;  // 最大杠杆上限 (%) = 20%
+  isLeverageConstrained: boolean; // 是否激活杠杆硬顶约束
+  rawTargetLeverageRatio: number; // 原始未约束杠杆率 (%)
+  portfolioAnnualVol: number;   // 组合加权年化波动率 (%)
+  dailyExpectedRisk: number;    // 组合每日期望风险 (元)
+  pendingTradeCount: number;    // 待执行调仓笔数
+  estimatedRebalanceCost: number; // 调仓总摩擦成本 (元)
+  carverIDM: number;            // 实时卡弗标的分散化乘数 (IDM)
+  effectiveAnnualVol: number;   // IDM 修正后的预期组合年化波动率 (%)
+  expectedAnnualReturn: number; // 理论预期综合年化收益率 (%)
+  riskAdjustedReturn: number;   // 波动率调整后绩效 (夏普比率 Sharpe Ratio = (R - Rf) / Vol)
+  returnToVolRatio: number;     // 收益波动比 (Expected Return / Vol)
+  sortinoRatio: number;         // 索提诺比率 (仅惩罚下行波动的风险调整收益)
+  calmarRatio: number;          // 卡尔玛比率 (年化预期收益 / 预估最大回撤)
+}
+
+export interface BacktestDataPoint {
+  date: string;
+  carverStrategyEquity: number; // 卡弗波动率定仓净值 (带T+1流动性保护)
+  carverUnprotectedEquity: number; // 未开启T+1流动性保护净值 (受滑点冲击)
+  equalWeightEquity: number;    // 等权重净值
+  csi300Equity: number;         // 沪深300买入持有净值
+  carverDrawdown: number;       // 卡弗回撤 (%)
+  csi300Drawdown: number;       // 沪深300回撤 (%)
+  slippageSavedBps?: number;    // 避免的滑点溢价基点
+}
+
+export interface ExternalDataAdapterConfig {
+  useMock: boolean;
+  endpointUrl: string;          // 用户外部API接口URL
+  apiKey?: string;
+  syncIntervalHours: number;
+  lastSyncTime?: string;
+}
+
+export type ValueMomentumQuadrant = 
+  | 'GOLDEN_RESONANCE'   // 双优黄金共振区 (低估值 + 强动量/低波动)
+  | 'VALUE_DEFENSIVE'    // 左侧价值潜伏区 (极度低估 + 弱动量/均线下方)
+  | 'TREND_MOMENTUM'     // 动量趋势博弈区 (偏高估值 + 强动量/突破均线)
+  | 'AVOID_RISK';        // 双杀防守规避区 (高估值 + 破位下行)
+
+export interface InstrumentAnalyticsItem {
+  instrument: AShareInstrument;
+  peTTM: number;
+  pb: number;
+  pePercentile: number;
+  pbPercentile: number;
+  compositeValuationPercentile: number;
+  equityRiskPremium: number; // ERP 股权风险溢价 (1/PE - 10Y国债利率) %
+  dividendYield: number;
+  valueScore: number;        // 价值安全边际总分 (0 - 100)
+  
+  annualizedVol: number;
+  volatilityPercentile: number; // 历史波动率分位 (0 - 100)
+  carverForecastScalar: number; // 卡弗预测标量 (-20 到 +20)
+  aboveMA250: boolean;          // 是否站上年线
+  momentumRiskScore: number;    // 动量与系统化风控总分 (0 - 100)
+  
+  quadrant: ValueMomentumQuadrant;
+  quadrantLabel: string;
+  quadrantColor: string;
+  quadrantAdvice: string;
+  
+  // 仓位对比与缓冲带判定
+  currentShares: number;
+  currentValue: number;
+  currentWeight: number;        // 当前持仓占比 (%)
+  targetShares: number;
+  targetValue: number;
+  targetWeight: number;         // 目标仓位占比 (%)
+  withinBuffer: boolean;        // 是否在缓冲带死区内
+  action: 'BUY' | 'SELL' | 'HOLD';
+  recommendedShares: number;
+  reasonForDifference: string;  // 实际仓位与目标仓位不同的具体原因分析
+}

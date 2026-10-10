@@ -1,0 +1,6 @@
+{
+  "name": "A股系统化交易与卡弗资金管理工作台",
+  "description": "基于罗伯特·卡弗波动率定仓模型与A股定制化策略体系的100万资金日频系统化交易工作台，预留标准化A股数据接入接口与低摩擦缓冲带调仓引擎。",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
