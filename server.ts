@@ -51,11 +51,37 @@ app.delete('/api/ashare/store', (_req, res) => {
   res.json({ success: true, removed, message: removed ? '持久化数据已清除' : '无持久化数据' });
 });
 
+// SSRF 防护：仅允许显式白名单内的主机通过服务端代理请求。
+// 旧实现允许客户端指定任意 targetUrl 由服务端 fetch，可被用于探测内网。
+const PROXY_ALLOWED_HOSTS = (process.env.PROXY_ALLOWED_HOSTS || '')
+  .split(',')
+  .map((s) => s.trim().toLowerCase())
+  .filter(Boolean);
+
+function isProxyHostAllowed(rawUrl: string): boolean {
+  try {
+    const u = new URL(rawUrl);
+    if (u.protocol !== 'https:' && u.protocol !== 'http:') return false;
+    if (PROXY_ALLOWED_HOSTS.length === 0) return false; // 未配置白名单则一律拒绝
+    const host = u.hostname.toLowerCase();
+    return PROXY_ALLOWED_HOSTS.some((h) => host === h || host.endsWith(`.${h}`));
+  } catch {
+    return false;
+  }
+}
+
 app.post('/api/ashare/proxy', async (req, res) => {
   try {
     const { targetUrl, headers, method, body } = req.body;
     if (!targetUrl) {
       res.status(400).json({ error: 'targetUrl is required' });
+      return;
+    }
+    if (!isProxyHostAllowed(targetUrl)) {
+      res.status(403).json({
+        error: 'targetUrl host not allowed',
+        hint: 'set PROXY_ALLOWED_HOSTS env (comma separated) to enable specific hosts',
+      });
       return;
     }
     const response = await fetch(targetUrl, {

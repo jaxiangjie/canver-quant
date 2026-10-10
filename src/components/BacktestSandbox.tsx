@@ -74,7 +74,8 @@ export const BacktestSandbox: React.FC<BacktestSandboxProps> = ({
   useEffect(() => {
     let cancelled = false;
     setIsComputing(true);
-    // 放到下一 tick 执行，避免阻塞图表首帧渲染
+    // debounce 200ms：滑块拖动（如 ADV 比例 step=0.05）会触发连续 onChange，
+    // 旧实现 setTimeout(...,0) 只错开一帧，每次都跑一遍全量 walk-forward，主线程掉帧。
     const timer = setTimeout(() => {
       try {
         const { series, metrics: m } = runRealBacktest(universe, settings, {
@@ -85,10 +86,17 @@ export const BacktestSandbox: React.FC<BacktestSandboxProps> = ({
           setDataPoints(series);
           setMetrics(m);
         }
+      } catch (err) {
+        // 旧实现无 catch：回测抛错会冒泡为未捕获异常，且旧 dataPoints 残留误导用户
+        if (!cancelled) {
+          console.error('[backtest] runRealBacktest failed:', err);
+          setDataPoints([]);
+          setMetrics(null);
+        }
       } finally {
         if (!cancelled) setIsComputing(false);
       }
-    }, 0);
+    }, 200);
     return () => {
       cancelled = true;
       clearTimeout(timer);

@@ -193,7 +193,10 @@ export function runRealBacktest(
     const targetDate = inst.bars[need - 1].tradeDate;
     return unionDates.indexOf(targetDate);
   });
-  const startIdx = Math.max(...activeFrom);
+  // 渐进入池：从最早有足够历史的标的处开始回测，其余标的达到 minHist 后自动加入。
+  // 旧实现取 max(activeFrom)，导致最晚上市的标的（如 513180 恒生科技）把回测起点整体拖后，
+  // 早期标的（如 510300 自 2013 起）的历史被白白丢弃，样本期被无谓截断。
+  const startIdx = Math.max(0, Math.min(...activeFrom));
   if (startIdx < 0 || startIdx >= unionDates.length - 1) {
     return { series: points, metrics: emptyMetrics(stressLevel, advCapRatio) };
   }
@@ -202,7 +205,12 @@ export function runRealBacktest(
   const totalCap = settings?.totalCapital || 1000000;
   const csiInst = safeUniverse.find(i => i.code.startsWith('510300')) || safeUniverse.find(i => i.category === 'broad_etf') || safeUniverse[0];
   const csiIdx = safeUniverse.indexOf(csiInst);
-  const csiStartPrice = csiInst.bars[prefixLen[csiIdx][startIdx] - 1]?.close || csiInst.currentPrice;
+  // 渐进入池后 startIdx 可能早于基准标的自身的激活点，需避免下标为 -1
+  const csiLen = prefixLen[csiIdx][startIdx] || 0;
+  const csiStartPrice =
+    csiLen > 0
+      ? csiInst.bars[csiLen - 1]?.close || csiInst.currentPrice
+      : csiInst.bars[0]?.close || csiInst.currentPrice;
 
   // 持仓（股数）
   const heldCarver = new Map<string, number>();

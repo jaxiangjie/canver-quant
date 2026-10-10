@@ -204,13 +204,15 @@ export function calculatePortfolio(
   const maxAllowedPortfolioCapital = totalCap * (1 + maxLeverage); // 120% 总市值上限 (120万)
 
   // 0. Compute Carver IDM (Instrument Diversification Multiplier)
+  // 相关性矩阵只算一次，IDM 与组合波动实算共用（manual 模式同样需要 rho 来实算组合波动）
+  const corrResult = safeUniverse.length > 1 ? computeUniverseCorrelationMatrix(safeUniverse, 60) : null;
+  const avgUniverseCorrelation = corrResult?.averageUniverseCorrelation ?? 0.30;
   let computedIDM = 1.0;
   if (safeUniverse.length > 1 && settings.useIDM !== false) {
     if (settings.idmMode === 'manual' && typeof settings.manualIDM === 'number') {
       computedIDM = Math.max(1.0, Math.min(settings.maxIDM || 2.20, settings.manualIDM));
     } else {
-      const corrResult = computeUniverseCorrelationMatrix(safeUniverse, 60);
-      computedIDM = Math.max(1.0, Math.min(settings.maxIDM || 1.80, corrResult.carverIDM || 1.45));
+      computedIDM = Math.max(1.0, Math.min(settings.maxIDM || 1.80, corrResult?.carverIDM || 1.45));
     }
   }
 
@@ -295,10 +297,18 @@ export function calculatePortfolio(
   const targetLeveragePct = Math.max(0, Number((targetLeverageRatio - 100).toFixed(1)));
   const rawTargetLeverageRatio = Number(((rawTargetCapitalSum / totalCap) * 100).toFixed(1));
 
-  // Portfolio weighted volatility & Effective Realized Volatility with IDM Compensation
-  const weightedVolSum = positions.reduce((acc, p) => acc + ((p?.currentWeight || 0) * (p?.instrument?.annualizedVol || 0.15)), 0);
-  const portfolioAnnualVol = Number((weightedVolSum * 0.85).toFixed(3));
-  const effectiveAnnualVol = Number((portfolioAnnualVol * (settings.useIDM !== false ? Math.min(1.30, computedIDM * 0.82) : 0.85) * 100).toFixed(1));
+  // 组合有效年化波动：按 σ_p = sqrt(ΣΣ w_i w_j σ_i σ_j ρ_ij) 实算（用平均 rho 近似）。
+  // 旧实现为 weightedVolSum × 0.85 × min(1.30, IDM×0.82)，两个折扣系数均无推导依据，
+  // 且与回测 Tab 的实测年化波动对不上，容易误导读数。
+  // targetWeight 为小数占比（targetCapital / totalCapital），用目标组合而非当前持仓来算有效波动
+  const wv = positions.map((p) => (p?.targetWeight || 0) * (p?.instrument?.annualizedVol || 0.15));
+  let volVar = 0;
+  for (let i = 0; i < wv.length; i++) {
+    volVar += wv[i] * wv[i];
+    for (let j = 0; j < i; j++) volVar += 2 * wv[i] * wv[j] * avgUniverseCorrelation;
+  }
+  const portfolioAnnualVol = Number(Math.sqrt(Math.max(0, volVar)).toFixed(3));
+  const effectiveAnnualVol = Number((portfolioAnnualVol * 100).toFixed(1));
   const dailyExpectedRisk = Math.round((totalCap * (effectiveAnnualVol / 100)) / Math.sqrt(250));
 
   // Theoretical Expected Annual Return (%): Risk free (2.2%) + Sharpe (0.85) * EffectiveVol - Friction (0.35%)
