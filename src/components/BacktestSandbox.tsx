@@ -1,6 +1,7 @@
 import React, { useRef, useEffect, useState } from 'react';
 import { AShareInstrument, BacktestDataPoint, CarverSettings, PortfolioSummaryStats } from '../types/ashare';
-import { generateBacktestSeries, DEFAULT_CARVER_SETTINGS } from '../services/carverEngine';
+import { DEFAULT_CARVER_SETTINGS } from '../services/carverEngine';
+import { runRealBacktest, BacktestMetrics } from '../services/backtestEngine';
 import { 
   LineChart, 
   BarChart2, 
@@ -63,15 +64,36 @@ export const BacktestSandbox: React.FC<BacktestSandboxProps> = ({
   const [showUnprotected, setShowUnprotected] = useState<boolean>(true);
 
   const [dataPoints, setDataPoints] = useState<BacktestDataPoint[]>([]);
+  const [metrics, setMetrics] = useState<BacktestMetrics | null>(null);
+  const [isComputing, setIsComputing] = useState<boolean>(false);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const drawdownCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const [hoverIndex, setHoverIndex] = useState<number | null>(null);
 
-  // Recalculate backtest series when universe, advCapRatio, or stressLevel change
+  // 真实回测：基于 parquet 后复权日线跑 walk-forward 月度再平衡，universe/参数变化时重算
   useEffect(() => {
-    const series = generateBacktestSeries(universe, advCapRatio, stressLevel);
-    setDataPoints(series);
-  }, [universe, advCapRatio, stressLevel]);
+    let cancelled = false;
+    setIsComputing(true);
+    // 放到下一 tick 执行，避免阻塞图表首帧渲染
+    const timer = setTimeout(() => {
+      try {
+        const { series, metrics: m } = runRealBacktest(universe, settings, {
+          advCapRatio,
+          stressLevel,
+        });
+        if (!cancelled) {
+          setDataPoints(series);
+          setMetrics(m);
+        }
+      } finally {
+        if (!cancelled) setIsComputing(false);
+      }
+    }, 0);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [universe, advCapRatio, stressLevel, settings]);
 
   // Draw Equity Curve Canvas
   useEffect(() => {
@@ -271,6 +293,10 @@ export const BacktestSandbox: React.FC<BacktestSandboxProps> = ({
   const unprotectedNetVal = dataPoints[dataPoints.length - 1]?.carverUnprotectedEquity || 1.072;
   const netAlphaGain = Number(((protectedNetVal - unprotectedNetVal) * 100).toFixed(2));
 
+  // 真实区间回撤（基于实测净值序列）
+  const carverMinDD = dataPoints.length ? Math.min(...dataPoints.map(p => p.carverDrawdown)) : 0;
+  const csiMinDD = dataPoints.length ? Math.min(...dataPoints.map(p => p.csi300Drawdown)) : 0;
+
   // Compute 5-day ADV and 20% cap for each instrument in universe
   const safeUniverse = Array.isArray(universe) ? universe.filter(Boolean) : [];
   const instrumentLiquidityList = safeUniverse.map(inst => {
@@ -387,6 +413,50 @@ export const BacktestSandbox: React.FC<BacktestSandboxProps> = ({
         <StrategyComparisonPanel universe={universe} />
       ) : (
         <>
+          {/* 真实回测绩效指标对比卡（基于 parquet 后复权日线） */}
+          {metrics && (
+            <div className="p-4 bg-slate-900/80 border border-emerald-900/50 rounded-lg">
+              <div className="flex items-center justify-between mb-3">
+                <h3 className="text-sm font-semibold text-white flex items-center gap-2">
+                  <TrendingDown className="w-4 h-4 text-emerald-400" />
+                  真实回测绩效 ({metrics.startDate} ~ {metrics.endDate} · {metrics.rebalanceCount} 次再平衡)
+                </h3>
+                <span className="text-[11px] text-slate-500 font-mono">
+                  ADV上限 {(metrics.advCapRatio * 100).toFixed(0)}% · 压力场景 {metrics.stressLevel === 'LIQUIDITY_CRUNCH' ? '流动性枯竭' : metrics.stressLevel === 'EXTREME_STRESS' ? '极端恐慌' : '常态'}
+                </span>
+              </div>
+              <div className="grid grid-cols-4 gap-2 text-xs">
+                <div className="text-slate-400 font-sans pl-1">指标</div>
+                <div className="text-center font-semibold text-emerald-400">卡弗策略</div>
+                <div className="text-center font-semibold text-cyan-400">等权重</div>
+                <div className="text-center font-semibold text-rose-400">沪深300</div>
+                {[
+                  ['累计收益 %', 'totalReturnPct'],
+                  ['年化 CAGR %', 'cagrPct'],
+                  ['年化波动 %', 'annVolPct'],
+                  ['夏普', 'sharpe'],
+                  ['索提诺', 'sortino'],
+                  ['最大回撤 %', 'maxDrawdownPct'],
+                  ['卡尔玛', 'calmar'],
+                ].map(([label, key]) => (
+                  <React.Fragment key={key}>
+                    <div className="text-slate-300 font-sans py-1 border-t border-slate-800">{label}</div>
+                    <div className="text-center font-mono py-1 border-t border-slate-800 text-white">{metrics.carver[key as keyof typeof metrics.carver]}</div>
+                    <div className="text-center font-mono py-1 border-t border-slate-800 text-slate-200">{metrics.equalWeight[key as keyof typeof metrics.equalWeight]}</div>
+                    <div className="text-center font-mono py-1 border-t border-slate-800 text-slate-200">{metrics.csi300[key as keyof typeof metrics.csi300]}</div>
+                  </React.Fragment>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* 计算中将 overlay 提示 */}
+          {isComputing && (
+            <div className="p-3 bg-slate-900/60 border border-slate-800 rounded-lg text-center text-xs text-slate-400 animate-pulse">
+              正在基于真实后复权日线计算回测净值，请稍候…
+            </div>
+          )}
+
           {/* 核心亮点：A股 T+1 流动性保护与极端滑点压力测试控制台 */}
           <div className="p-5 bg-slate-900/80 border border-slate-800 rounded-lg flex flex-col gap-5">
         <div className="flex flex-wrap items-center justify-between gap-4 pb-3 border-b border-slate-800">
@@ -471,7 +541,9 @@ export const BacktestSandbox: React.FC<BacktestSandboxProps> = ({
               +{totalSlippageSaved} bps <span className="text-xs font-normal text-slate-300">(约 +{(totalSlippageSaved / 100).toFixed(2)}%)</span>
             </span>
             <span className="text-[11px] text-slate-400 font-sans">
-              100万总仓挽救 ¥{Math.round(totalSlippageSaved * 100).toLocaleString()} 元隐形成本
+              {totalSlippageSaved < 1
+                ? '标的流动性充裕（旗舰 ETF），冲击成本本就亚基点级，保护机制在此池下收益可忽略'
+                : `100万总仓挽救 ¥${Math.round(totalSlippageSaved * 100).toLocaleString()} 元隐形成本`}
             </span>
           </div>
 
@@ -479,10 +551,12 @@ export const BacktestSandbox: React.FC<BacktestSandboxProps> = ({
           <div className="p-3.5 bg-slate-800/40 rounded border border-slate-800 flex flex-col gap-1">
             <span className="text-slate-400 font-sans">保护机制净值超额收益</span>
             <span className="text-lg font-bold text-cyan-400">
-              +{netAlphaGain}%
+              {netAlphaGain >= 0 ? '+' : ''}{netAlphaGain}%
             </span>
             <span className="text-[11px] text-slate-400 font-sans">
-              受保护 1.{((protectedNetVal - 1) * 1000).toFixed(0)} vs 受冲击 1.{((unprotectedNetVal - 1) * 1000).toFixed(0)}
+              {netAlphaGain < 0.01
+                ? '高流动性标的受保护≈未保护；接小盘/低流动性标的时差异将显著放大'
+                : `受保护 1.${((protectedNetVal - 1) * 1000).toFixed(0)} vs 受冲击 1.${((unprotectedNetVal - 1) * 1000).toFixed(0)}`}
             </span>
           </div>
 
@@ -490,10 +564,10 @@ export const BacktestSandbox: React.FC<BacktestSandboxProps> = ({
           <div className="p-3.5 bg-slate-800/40 rounded border border-slate-800 flex flex-col gap-1">
             <span className="text-slate-400 font-sans">极端回撤压缩度</span>
             <span className="text-lg font-bold text-amber-400">
-              -6.7% vs -12.4%
+              {carverMinDD.toFixed(1)}% vs {csiMinDD.toFixed(1)}%
             </span>
             <span className="text-[11px] text-slate-500 font-sans">
-              消除冲击滑点带来的次生下坠
+              卡弗受保护最大回撤 vs 沪深300买入持有
             </span>
           </div>
         </div>
@@ -569,7 +643,7 @@ export const BacktestSandbox: React.FC<BacktestSandboxProps> = ({
           <div className="flex items-center gap-2">
             <LineChart className="w-4 h-4 text-emerald-400" />
             <h3 className="text-sm font-semibold text-white">
-              策略净值曲线对比 (近120个交易日 · 含极端滑点压力测试)
+              策略净值曲线对比 (真实后复权 {dataPoints[0]?.date} ~ {dataPoints[dataPoints.length - 1]?.date} · 月度再平衡)
             </h3>
           </div>
 
