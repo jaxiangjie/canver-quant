@@ -280,5 +280,28 @@ export const INITIAL_INSTRUMENTS: AShareInstrument[] = [
     pePercentile: 36.5,
     pbPercentile: 32.0,
     bars: generateHistoricalBars(8.85, 0.205, 0.09, 'steady', 7),
+  },
+  {
+    id: '513180',
+    code: '513180.SH',
+    name: '恒生科技ETF (QDII)',
+    category: 'qdii_etf',
+    isETF: true,
+    isT0: true, // T+0 回转 (跨境 QDII ETF)
+    stampDutyExempt: true,
+    currentPrice: 0.620,
+    preClose: 0.615,
+    changePct: 0.81,
+    dailyATR: 0.018,
+    annualizedVol: 0.305, // 恒生科技高波动，真实数值由 parquet 覆盖
+    riskBudgetWeight: 0.10,
+    currentShares: 80000, // 800手
+    premiumDiscountRate: 0.85, // QDII 常见溢价
+    dividendYield: 0.55,
+    peTTM: 22.0,
+    pb: 2.60,
+    pePercentile: 30.0,
+    pbPercentile: 25.0,
+    bars: generateHistoricalBars(0.620, 0.305, 0.14, 'up', 8),
   }
 ];

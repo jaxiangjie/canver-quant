@@ -107,6 +107,7 @@ export interface CarverSettings {
   manualIDM?: number;            // 手动指定的分散化乘数 (推荐区间 1.20 - 1.80)
   maxIDM?: number;               // IDM 放大倍数上限，默认 1.80
   useERPTilt?: boolean;          // 是否启用 A股股债收益差 (ERP/Fed模型) 逆向战术偏置
+  enforceTargetVol?: boolean;     // 目标波动是否作为基准敞口（中性=1.0x 满仓）而非上限；默认 true，让目标波动率真正生效
   stockCommissionRate: number;   // 股票交易佣金率，默认 0.00025 (万2.5)
   etfCommissionRate: number;     // ETF交易佣金率，默认 0.0001 (万1)
   stockStampDuty: number;        // 股票卖出印花税，默认 0.0005 (千0.5)

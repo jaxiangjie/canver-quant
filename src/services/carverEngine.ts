@@ -21,6 +21,7 @@ export const DEFAULT_CARVER_SETTINGS: CarverSettings = {
   manualIDM: 1.45,               // 手动设定值（推荐区间 1.20 - 1.80）
   maxIDM: 1.80,                  // IDM 放大倍数上限 1.80
   useERPTilt: true,              // 启用 A 股股债收益差 ERP 逆向战术偏置
+  enforceTargetVol: true,        // 目标波动即基准敞口：中性=1.0x 满仓，让目标波动率真正生效（非上限）
   stockCommissionRate: 0.00025,  // 万2.5
   etfCommissionRate: 0.0001,     // 万1
   stockStampDuty: 0.0005,        // 股票卖出千分之0.5
@@ -92,15 +93,18 @@ export function calculateInstrumentPosition(
     }
   }
 
-  // Scalar Multiplier: in Carver long-only framework:
-  // scalar = 10 -> 1.0x (normal exposure)
-  // scalar = 20 -> 2.0x (maximum bullish conviction)
-  // scalar = 0  -> 0.0x (neutral / cash)
-  // scalar < 0  -> 0.0x (defensive exit)
+  // Scalar Multiplier:
+  // enforceTargetVol(默认 true): 目标波动即基准敞口 —— 中性(scalar=0)=1.0x 满仓，看多(+20)=2.0x，看空(-20)=0x
+  //   让"目标波动率"成为组合真实要达成的基准，而非被信号打折后的上限
+  // 传统择时(enforceTargetVol=false): 仅正信号持仓，中性/负=0 空仓防御（原 Carver 趋势语义）
   let scalarMultiplier = 0;
   if (instrument.category === 'bond_etf') {
-    // Bond ETF acts as ballast asset; minimum floor 0.8x
-    scalarMultiplier = Math.max(0.8, (scalar + 10) / 10);
+    // 债券 ETF 压舱石：保留 0.8x 下限
+    scalarMultiplier = settings.enforceTargetVol !== false
+      ? Math.max(0.8, (scalar + 20) / 20)
+      : Math.max(0.8, (scalar + 10) / 10);
+  } else if (settings.enforceTargetVol !== false) {
+    scalarMultiplier = Math.max(0, Math.min(2.0, (scalar + 20) / 20));
   } else if (scalar > 0) {
     scalarMultiplier = Math.min(2.0, scalar / 10);
   } else {
