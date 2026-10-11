@@ -7,6 +7,9 @@ data/*
 !data/parquet/
 !data/parquet/daily/
 !data/parquet/daily/*.parquet
+# 估值快照库随仓库提交：指数PE历史(回补) + 每日估值快照，clone 后无需重新抓取即可计算分位
+!data/valuation/
+!data/valuation/*.jsonl
 .DS_Store
 *.log
 .env*
