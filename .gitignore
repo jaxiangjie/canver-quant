@@ -1,7 +1,12 @@
 node_modules/
 build/
 dist/
-coverage/
+data/*
+# 内嵌的静态参考行情（parquet）需随仓库提交，保证 clone 即可跑真实回测、数据自包含
+# 注意：必须用 data/* 而非 data/，否则被排除目录下的内容无法用 ! 重新纳入
+!data/parquet/
+!data/parquet/daily/
+!data/parquet/daily/*.parquet
 .DS_Store
 *.log
 .env*

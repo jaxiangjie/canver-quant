@@ -67,6 +67,70 @@ export function generate5YearValuationHistory(instrument: AShareInstrument): His
 }
 
 /**
+ * Generate 3-year quarterly historical PE/PB valuation percentile trajectory (12 quarters)
+ * Covering 2023-Q2 to 2026-Q1 (recent 3-year market cycle: from 2023 valuation adjustment,
+ * 2024-Q1 historical bottom, 2024-Q4 policy rebound, to 2026 current level).
+ */
+export function generate3YearValuationHistory(instrument: Partial<AShareInstrument>): HistoricalValuationPoint[] {
+  if (!instrument) return [];
+  const isCommodityOrBond = instrument.category === 'bond_etf' || instrument.category === 'commodity_etf';
+  const quarters3Y = [
+    '2023-Q2', '2023-Q3', '2023-Q4',
+    '2024-Q1', '2024-Q2', '2024-Q3', '2024-Q4',
+    '2025-Q1', '2025-Q2', '2025-Q3', '2025-Q4',
+    '2026-Q1'
+  ];
+
+  const currentPE = instrument.peTTM || 15;
+  const currentPB = instrument.pb || 1.5;
+  const currentPEPct = instrument.pePercentile ?? 50;
+  const currentPBPct = instrument.pbPercentile ?? 50;
+
+  // 3-year macro valuation trajectory (2023 mid-level -> 2024-Q1 deep value trough -> 2024-Q4 policy pivot rebound -> 2025 dispersion -> current)
+  const macro3YCycle = [
+    42, 34, 22,
+    14, 25, 32, 48,
+    42, 44, 35, 30,
+    currentPEPct
+  ];
+
+  return quarters3Y.map((q, idx) => {
+    if (isCommodityOrBond) {
+      return {
+        date: q,
+        pe: 0,
+        pb: 0,
+        pePercentile: 50,
+        pbPercentile: 50,
+        compositePercentile: 50,
+      };
+    }
+
+    const baseCycleVal = macro3YCycle[idx];
+    const pePct = Math.round(Math.max(5, Math.min(95, baseCycleVal * (currentPEPct / 50))));
+    const pbPct = Math.round(Math.max(5, Math.min(95, (baseCycleVal - 3) * (currentPBPct / 50))));
+
+    // Exact match for the last point (current)
+    const finalPEPct = idx === quarters3Y.length - 1 ? currentPEPct : pePct;
+    const finalPBPct = idx === quarters3Y.length - 1 ? currentPBPct : pbPct;
+    const compPct = Math.round(finalPEPct * 0.55 + finalPBPct * 0.45);
+
+    // Approximate historical PE/PB values matching the percentile
+    const peVal = Number((currentPE * (0.65 + (finalPEPct / 100) * 0.7)).toFixed(1));
+    const pbVal = Number((currentPB * (0.65 + (finalPBPct / 100) * 0.7)).toFixed(2));
+
+    return {
+      date: q,
+      pe: idx === quarters3Y.length - 1 ? currentPE : peVal,
+      pb: idx === quarters3Y.length - 1 ? currentPB : pbVal,
+      pePercentile: finalPEPct,
+      pbPercentile: finalPBPct,
+      compositePercentile: compPct,
+    };
+  });
+}
+
+/**
  * Exponential Moving Average
  */
 function calculateEMA(values: number[], span: number): number[] {

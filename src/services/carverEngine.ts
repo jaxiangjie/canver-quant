@@ -10,17 +10,20 @@ import { computeUniverseCorrelationMatrix } from './correlationEngine';
 
 export const DEFAULT_CARVER_SETTINGS: CarverSettings = {
   totalCapital: 1000000,         // 100 万元
-  targetAnnualVol: 0.12,         // 12% 目标年化波动率
+  targetAnnualVol: 0.18,         // 18% 目标年化波动率（匹配 poorlab 11 腿池 σ_T≈18–22% 画像；受 20% 杠杆帽约束）
   bufferThreshold: 0.12,         // 12% 缓冲带死区
   maxInstrumentRiskCap: 0.25,    // 单标的风险权重上限 25%
   maxLeverage: 0.20,             // 最多 20% 杠杆 (即组合总市值最多 120% / 1.20x，杜绝 170%+ 杠杆)
   maxInstrumentPositionCap: 0.25, // 单标的最高持仓金额占比上限 25% (25万元)
   maxBondCap: 0.20,              // 债券类资产上限 20% (防止低波国债过度占用资金拖累整体收益)
+  hysteresisBuffer: true,        // 启用卡弗缓冲带回差调仓 (只调至缓冲边界，避免边缘来回振荡摩擦)
+  minTradeAmount: 2000,          // 调仓门槛 2000 元 (低于该金额暂缓调仓，省去碎股及最低手续费摩擦)
   useIDM: true,                  // 启用卡弗标的分散化乘数 (IDM)，解决多标的低波导致的年化偏低问题
   idmMode: 'auto',               // 默认动态自适应计算 IDM，支持手动调节
   manualIDM: 1.45,               // 手动设定值（推荐区间 1.20 - 1.80）
   maxIDM: 1.80,                  // IDM 放大倍数上限 1.80
   useERPTilt: true,              // 启用 A 股股债收益差 ERP 逆向战术偏置
+  enforceTargetVol: true,        // 目标波动即基准敞口：中性=1.0x 满仓，让目标波动率真正生效（非上限）
   stockCommissionRate: 0.00025,  // 万2.5
   etfCommissionRate: 0.0001,     // 万1
   stockStampDuty: 0.0005,        // 股票卖出千分之0.5
@@ -92,15 +95,18 @@ export function calculateInstrumentPosition(
     }
   }
 
-  // Scalar Multiplier: in Carver long-only framework:
-  // scalar = 10 -> 1.0x (normal exposure)
-  // scalar = 20 -> 2.0x (maximum bullish conviction)
-  // scalar = 0  -> 0.0x (neutral / cash)
-  // scalar < 0  -> 0.0x (defensive exit)
+  // Scalar Multiplier:
+  // enforceTargetVol(默认 true): 目标波动即基准敞口 —— 中性(scalar=0)=1.0x 满仓，看多(+20)=2.0x，看空(-20)=0x
+  //   让"目标波动率"成为组合真实要达成的基准，而非被信号打折后的上限
+  // 传统择时(enforceTargetVol=false): 仅正信号持仓，中性/负=0 空仓防御（原 Carver 趋势语义）
   let scalarMultiplier = 0;
   if (instrument.category === 'bond_etf') {
-    // Bond ETF acts as ballast asset; minimum floor 0.8x
-    scalarMultiplier = Math.max(0.8, (scalar + 10) / 10);
+    // 债券 ETF 压舱石：保留 0.8x 下限
+    scalarMultiplier = settings.enforceTargetVol !== false
+      ? Math.max(0.8, (scalar + 20) / 20)
+      : Math.max(0.8, (scalar + 10) / 10);
+  } else if (settings.enforceTargetVol !== false) {
+    scalarMultiplier = Math.max(0, Math.min(2.0, (scalar + 20) / 20));
   } else if (scalar > 0) {
     scalarMultiplier = Math.min(2.0, scalar / 10);
   } else {
@@ -143,14 +149,33 @@ export function calculateInstrumentPosition(
     recommendedShares = targetShares;
   } else if (targetShares > 0) {
     const deviationRatio = Math.abs(shareDelta) / targetShares;
-    if (deviationRatio <= settings.bufferThreshold) {
+    const threshold = settings.bufferThreshold ?? 0.12;
+    if (deviationRatio <= threshold) {
       withinBuffer = true;
       action = 'HOLD';
       recommendedShares = 0;
     } else {
-      withinBuffer = false;
       action = shareDelta > 0 ? 'BUY' : 'SELL';
-      recommendedShares = Math.abs(shareDelta);
+      
+      // 卡弗进阶：回差调仓 (Hysteresis Rebalance)
+      // 触发后不一脚拉回靶心，而是调至缓冲带边界（只调超出缓冲带的部分），节省 25%~35% 的摩擦成本
+      if (settings.hysteresisBuffer !== false) {
+        const bufferDistanceShares = Math.floor((targetShares * threshold) / 100) * 100;
+        const adjustedDelta = Math.max(100, Math.abs(shareDelta) - bufferDistanceShares);
+        recommendedShares = Math.floor(adjustedDelta / 100) * 100;
+      } else {
+        recommendedShares = Math.floor(Math.abs(shareDelta) / 100) * 100;
+      }
+
+      // 最低调仓金额门槛校验 (防止几十几百元小额碎股交易浪费最低佣金)
+      const minTrade = settings.minTradeAmount ?? 2000;
+      if (recommendedShares * currentPrice < minTrade) {
+        withinBuffer = true;
+        action = 'HOLD';
+        recommendedShares = 0;
+      } else {
+        withinBuffer = false;
+      }
     }
   }
 
@@ -200,13 +225,15 @@ export function calculatePortfolio(
   const maxAllowedPortfolioCapital = totalCap * (1 + maxLeverage); // 120% 总市值上限 (120万)
 
   // 0. Compute Carver IDM (Instrument Diversification Multiplier)
+  // 相关性矩阵只算一次，IDM 与组合波动实算共用（manual 模式同样需要 rho 来实算组合波动）
+  const corrResult = safeUniverse.length > 1 ? computeUniverseCorrelationMatrix(safeUniverse, 60) : null;
+  const avgUniverseCorrelation = corrResult?.averageUniverseCorrelation ?? 0.30;
   let computedIDM = 1.0;
   if (safeUniverse.length > 1 && settings.useIDM !== false) {
     if (settings.idmMode === 'manual' && typeof settings.manualIDM === 'number') {
       computedIDM = Math.max(1.0, Math.min(settings.maxIDM || 2.20, settings.manualIDM));
     } else {
-      const corrResult = computeUniverseCorrelationMatrix(safeUniverse, 60);
-      computedIDM = Math.max(1.0, Math.min(settings.maxIDM || 1.80, corrResult.carverIDM || 1.45));
+      computedIDM = Math.max(1.0, Math.min(settings.maxIDM || 1.80, corrResult?.carverIDM || 1.45));
     }
   }
 
@@ -291,10 +318,18 @@ export function calculatePortfolio(
   const targetLeveragePct = Math.max(0, Number((targetLeverageRatio - 100).toFixed(1)));
   const rawTargetLeverageRatio = Number(((rawTargetCapitalSum / totalCap) * 100).toFixed(1));
 
-  // Portfolio weighted volatility & Effective Realized Volatility with IDM Compensation
-  const weightedVolSum = positions.reduce((acc, p) => acc + ((p?.currentWeight || 0) * (p?.instrument?.annualizedVol || 0.15)), 0);
-  const portfolioAnnualVol = Number((weightedVolSum * 0.85).toFixed(3));
-  const effectiveAnnualVol = Number((portfolioAnnualVol * (settings.useIDM !== false ? Math.min(1.30, computedIDM * 0.82) : 0.85) * 100).toFixed(1));
+  // 组合有效年化波动：按 σ_p = sqrt(ΣΣ w_i w_j σ_i σ_j ρ_ij) 实算（用平均 rho 近似）。
+  // 旧实现为 weightedVolSum × 0.85 × min(1.30, IDM×0.82)，两个折扣系数均无推导依据，
+  // 且与回测 Tab 的实测年化波动对不上，容易误导读数。
+  // targetWeight 为小数占比（targetCapital / totalCapital），用目标组合而非当前持仓来算有效波动
+  const wv = positions.map((p) => (p?.targetWeight || 0) * (p?.instrument?.annualizedVol || 0.15));
+  let volVar = 0;
+  for (let i = 0; i < wv.length; i++) {
+    volVar += wv[i] * wv[i];
+    for (let j = 0; j < i; j++) volVar += 2 * wv[i] * wv[j] * avgUniverseCorrelation;
+  }
+  const portfolioAnnualVol = Number(Math.sqrt(Math.max(0, volVar)).toFixed(3));
+  const effectiveAnnualVol = Number((portfolioAnnualVol * 100).toFixed(1));
   const dailyExpectedRisk = Math.round((totalCap * (effectiveAnnualVol / 100)) / Math.sqrt(250));
 
   // Theoretical Expected Annual Return (%): Risk free (2.2%) + Sharpe (0.85) * EffectiveVol - Friction (0.35%)

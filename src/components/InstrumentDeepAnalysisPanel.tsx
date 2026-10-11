@@ -12,6 +12,7 @@ import { generate5YearValuationHistory } from '../services/ashareStrategies';
 import { ValueMomentumScatterMatrix } from './ValueMomentumScatterMatrix';
 import { InstrumentPriceTrendChart } from './InstrumentPriceTrendChart';
 import { ValuationHistoryChart } from './ValuationHistoryChart';
+import { HistoricalValuationRangeChart } from './HistoricalValuationRangeChart';
 import { 
   Radar, 
   Compass, 
@@ -638,6 +639,16 @@ export const InstrumentDeepAnalysisPanel: React.FC<InstrumentDeepAnalysisPanelPr
               </div>
             </div>
           </div>
+
+          {/* 历史 3 年 PE/PB 估值分位区间图谱 (利用 historicalValuation 字段展示相对于历史 3 年的区间与三色带) */}
+          <HistoricalValuationRangeChart
+            historicalValuation={selectedItem.instrument.historicalValuation}
+            instrument={selectedItem.instrument}
+            currentPEPercentile={selectedItem.pePercentile}
+            currentPBPercentile={selectedItem.pbPercentile}
+            currentPETTM={selectedItem.peTTM}
+            currentPB={selectedItem.pb}
+          />
 
           {/* 图表对比区: 价格趋势动量通道 + 5年估值分位演化 */}
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">

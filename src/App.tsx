@@ -19,6 +19,54 @@ import { AddInstrumentModal } from './components/AddInstrumentModal';
 import { InstrumentDeepAnalysisPanel } from './components/InstrumentDeepAnalysisPanel';
 import { DocumentationCenter } from './components/DocumentationCenter';
 
+// 组合（bundle）层：把 catalog 按组合定义过滤+套权重，得到可切换的测试宇宙
+import { DEFAULT_BUNDLES, BALANCED9_ID, resolveUniverse, InstrumentBundle } from './services/bundles';
+import { BundleSelector } from './components/BundleSelector';
+
+const BUNDLES_KEY = 'canver.bundles.v1';
+const ACTIVE_KEY = 'canver.activeBundle.v1';
+function loadBundles(): InstrumentBundle[] {
+  try {
+    const s = localStorage.getItem(BUNDLES_KEY);
+    if (s) {
+      const stored = JSON.parse(s) as InstrumentBundle[];
+      // 保证新增的内置 bundle 始终能被合并识别
+      const existingIds = new Set(stored.map((b) => b.id));
+      const merged = [...stored];
+      for (const def of DEFAULT_BUNDLES) {
+        if (!existingIds.has(def.id)) {
+          merged.push(def);
+        }
+      }
+      return merged;
+    }
+  } catch {
+    /* ignore */
+  }
+  return DEFAULT_BUNDLES;
+}
+function persistBundles(b: InstrumentBundle[]) {
+  try {
+    localStorage.setItem(BUNDLES_KEY, JSON.stringify(b));
+  } catch {
+    /* ignore */
+  }
+}
+function loadActiveId(): string {
+  try {
+    return localStorage.getItem(ACTIVE_KEY) || BALANCED9_ID;
+  } catch {
+    return BALANCED9_ID;
+  }
+}
+function persistActiveId(id: string) {
+  try {
+    localStorage.setItem(ACTIVE_KEY, id);
+  } catch {
+    /* ignore */
+  }
+}
+
 export default function App() {
   const [universe, setUniverse] = useState<AShareInstrument[]>([]);
   const [settings, setSettings] = useState<CarverSettings>(DEFAULT_CARVER_SETTINGS);
@@ -27,6 +75,8 @@ export default function App() {
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
   const [isMonitoringActive, setIsMonitoringActive] = useState(true);
+  const [bundles, setBundles] = useState<InstrumentBundle[]>(() => loadBundles());
+  const [activeBundleId, setActiveBundleId] = useState<string>(() => loadActiveId());
 
   // Initialize data on mount
   useEffect(() => {
@@ -44,10 +94,20 @@ export default function App() {
     init();
   }, []);
 
+  // 当前激活组合 → 测试宇宙
+  const activeBundle = useMemo(
+    () => bundles.find((b) => b.id === activeBundleId) ?? bundles[0],
+    [bundles, activeBundleId],
+  );
+  const activeUniverse = useMemo(
+    () => resolveUniverse(universe, activeBundle),
+    [universe, activeBundle],
+  );
+
   // Recalculate Carver Portfolio Positions whenever universe or settings change
   const { positions, summary } = useMemo(() => {
-    return calculatePortfolio(universe, settings);
-  }, [universe, settings]);
+    return calculatePortfolio(activeUniverse, settings);
+  }, [activeUniverse, settings]);
 
   // 实时监测：当任意标的波动率/持仓偏离触发卡弗缓冲带边界（withinBuffer === false 且需买卖）
   const breachedPositions = useMemo(() => {
@@ -77,10 +137,15 @@ export default function App() {
   };
 
   const handleUpdateInstrumentWeight = (id: string, weight: number) => {
-    setUniverse(prev => {
-      const updated = prev.map(inst => inst.id === id ? { ...inst, riskBudgetWeight: weight } : inst);
-      AShareDataService.saveInstruments(updated);
-      return updated;
+    // 权重是「组合」的属性：编辑即更新当前激活组合的该标的权重，并持久化到 localStorage
+    setBundles(prev => {
+      const next = prev.map(b =>
+        b.id === activeBundleId
+          ? { ...b, items: b.items.map(it => (it.id === id ? { ...it, riskBudgetWeight: weight } : it)) }
+          : b,
+      );
+      persistBundles(next);
+      return next;
     });
   };
 
@@ -171,6 +236,18 @@ export default function App() {
         maxLeverageLimitPct={summary.maxLeverageLimitPct}
       />
 
+      {/* 组合（bundle）切换条：任意换一组打包组合后的标的进行测试 */}
+      <div className="border-b border-slate-800 bg-[#0B1120]">
+        <div className="max-w-[1520px] w-full mx-auto px-4 py-2 flex items-center gap-3">
+          <BundleSelector
+            bundles={bundles}
+            activeId={activeBundleId}
+            onSelect={(id) => { setActiveBundleId(id); persistActiveId(id); }}
+          />
+          <span className="text-[11px] text-slate-500 truncate">{activeBundle?.description}</span>
+        </div>
+      </div>
+
       {/* 资金总览与风险状态 KPI Strip & 动态风险预算贡献图 */}
       <PortfolioSummary
         summary={summary}
@@ -182,7 +259,7 @@ export default function App() {
       <main className="flex-1 max-w-[1520px] w-full mx-auto pb-12">
         {activeTab === 'sizer' && (
           <CarverPositionSizer
-            universe={universe}
+            universe={activeUniverse}
             positions={positions}
             settings={settings}
             onUpdateSettings={handleUpdateSettings}
@@ -194,7 +271,7 @@ export default function App() {
 
         {activeTab === 'analytics' && (
           <InstrumentDeepAnalysisPanel
-            universe={universe}
+            universe={activeUniverse}
             positions={positions}
             settings={settings}
             onNavigateToExecution={() => setActiveTab('execution')}
@@ -203,7 +280,7 @@ export default function App() {
 
         {activeTab === 'strategy' && (
           <StrategyAnalysisPanel
-            universe={universe}
+            universe={activeUniverse}
           />
         )}
 
@@ -217,7 +294,7 @@ export default function App() {
 
         {activeTab === 'backtest' && (
           <BacktestSandbox
-            universe={universe}
+            universe={activeUniverse}
             settings={settings}
             summary={summary}
           />

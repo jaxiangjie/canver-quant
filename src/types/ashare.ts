@@ -18,7 +18,8 @@ export interface AShareBar {
   close: number;
   preClose?: number;
   volume: number;       // 成交量 (手)
-  turnover: number;     // 成交额 (万元)
+  turnover: number;     // 成交额 (万元，展示用)
+  amount?: number;      // 真实成交额 (元)，优先用于 ADV / 市场冲击成本计算
   changePct: number;    // 涨跌幅 (%)
   ma20?: number;
   ma60?: number;
@@ -39,6 +40,8 @@ export interface AShareInstrument {
   changePct: number;
   dailyATR: number;     // 20日ATR (绝对价格波幅)
   annualizedVol: number;// 20日年化波动率 (例如 0.18 = 18%)
+  dataSource?: 'parquet' | 'fallback' | 'manual'; // 数据来源：parquet 真实行情 / 无数据回退模板 / 用户自定义
+  syntheticBars?: boolean;  // bars 是否为合成的伪数据（无真实行情源）；回测与相关性计算应排除此类标的
   riskBudgetWeight: number; // 目标风险预算权重 (0 - 1)
   currentShares: number;// 当前实际持有股数 (手数为 currentShares / 100)
   premiumDiscountRate?: number; // ETF二级市场折溢价率 (%)
@@ -47,6 +50,7 @@ export interface AShareInstrument {
   pb?: number;                  // 市净率 (PB)
   pePercentile?: number;        // PE历史百分位 (0 - 100%)
   pbPercentile?: number;        // PB历史百分位 (0 - 100%)
+  historicalValuation?: HistoricalValuationPoint[]; // 历史估值分位序列 (含PE/PB分位及数值)
   bars: AShareBar[];    // 历史日线
 }
 
@@ -102,15 +106,33 @@ export interface CarverSettings {
   maxLeverage: number;           // 最大允许杠杆率上限，默认 0.20 (20% 杠杆，即组合总市值最多 120% / 1.20x)
   maxInstrumentPositionCap: number; // 单标的最高资金占比上限，默认 0.25 (25%)
   maxBondCap?: number;           // 债券资产总额/单标的上限，默认 0.20 (20%，防止超低波债券过度占用资金拖累年化)
+  hysteresisBuffer?: boolean;    // 是否启用缓冲带回差调仓 (Hysteresis Buffer)：触发后调至边界而非靶心，避免边缘来回摩擦
+  minTradeAmount?: number;       // 最低调仓成交金额门槛 (元)，默认 2000 元，低于此金额暂缓调仓，节省整手碎股与手续费
   useIDM?: boolean;              // 是否启用卡弗标的分散化乘数 (Instrument Diversification Multiplier)，解决多标的低波导致的年化偏低问题
   idmMode?: 'auto' | 'manual';   // IDM 设置模式：'auto' (根据相关性矩阵自动计算) 或 'manual' (用户手动指定)
   manualIDM?: number;            // 手动指定的分散化乘数 (推荐区间 1.20 - 1.80)
   maxIDM?: number;               // IDM 放大倍数上限，默认 1.80
   useERPTilt?: boolean;          // 是否启用 A股股债收益差 (ERP/Fed模型) 逆向战术偏置
+  enforceTargetVol?: boolean;     // 目标波动是否作为基准敞口（中性=1.0x 满仓）而非上限；默认 true，让目标波动率真正生效
   stockCommissionRate: number;   // 股票交易佣金率，默认 0.00025 (万2.5)
   etfCommissionRate: number;     // ETF交易佣金率，默认 0.0001 (万1)
   stockStampDuty: number;        // 股票卖出印花税，默认 0.0005 (千0.5)
   slippageBps: number;           // 滑点基点，默认 5 bps
+}
+
+// ──────────────────────────────────────────────────────────────
+// 标的组合（bundle）：把若干标的 + 各自风险预算权重打包成一个可切换的测试宇宙
+// ──────────────────────────────────────────────────────────────
+export interface BundleItem {
+  id: string;               // 标的物 id（与 AShareInstrument.id 对应，通常为 6 位代码）
+  riskBudgetWeight: number; // 该标的在本组合中的风险预算权重 (0 - 1)
+}
+
+export interface InstrumentBundle {
+  id: string;
+  name: string;
+  description?: string;
+  items: BundleItem[];
 }
 
 export interface PositionCalculation {

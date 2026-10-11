@@ -4,6 +4,7 @@ import {
   CarverSettings, 
   PositionCalculation 
 } from '../types/ashare';
+import { computeUniverseCorrelationMatrix } from '../services/correlationEngine';
 import { 
   Sliders, 
   ShieldCheck, 
@@ -27,6 +28,7 @@ interface CarverPositionSizerProps {
 }
 
 export const CarverPositionSizer: React.FC<CarverPositionSizerProps> = ({
+  universe,
   positions,
   settings,
   onUpdateSettings,
@@ -43,6 +45,15 @@ export const CarverPositionSizer: React.FC<CarverPositionSizerProps> = ({
   const currentLeveragePct = Math.max(0, Number((currentGrossRatio - 100).toFixed(1)));
   const maxLeverageLimitPct = Number(((settings.maxLeverage ?? 0.20) * 100).toFixed(0));
   const totalBudgetWeight = (positions || []).reduce((acc, p) => acc + (p?.instrument?.riskBudgetWeight || 0), 0);
+
+  // 真实自适应 IDM：基于 60D 相关性矩阵求解（与相关性分析页同一引擎，避免重复"计算中"占位）
+  const autoIDM = React.useMemo(() => {
+    try {
+      return computeUniverseCorrelationMatrix(universe || []).carverIDM;
+    } catch {
+      return 1.0;
+    }
+  }, [universe]);
 
   return (
     <div className="flex flex-col gap-6 p-6">
@@ -81,12 +92,12 @@ export const CarverPositionSizer: React.FC<CarverPositionSizerProps> = ({
             <button
               onClick={() => onUpdateSettings({ ...settings, targetAnnualVol: 0.20, bufferThreshold: 0.12, maxLeverage: 0.20, maxBondCap: 0.20 })}
               className={`px-2.5 py-1 rounded border transition-colors font-medium flex items-center gap-1 shadow-sm ${
-                settings.targetAnnualVol === 0.20
+                settings.targetAnnualVol === 0.20 && (settings.maxLeverage ?? 0.20) === 0.20
                   ? 'bg-cyan-950 text-cyan-200 border-cyan-500 font-bold' 
                   : 'bg-cyan-950/60 hover:bg-cyan-900 text-cyan-300 border-cyan-700/80'
               }`}
             >
-              🎯 进取冲刺 (20% Vol · 债限20%)
+              🎯 进取冲刺 (20%目标 · 杠杆20%)
             </button>
           </div>
         </div>
@@ -343,7 +354,7 @@ export const CarverPositionSizer: React.FC<CarverPositionSizerProps> = ({
                 ) : (
                   <div className="flex items-center justify-between p-2 rounded bg-slate-950/60 border border-indigo-900/30 text-[11px] font-mono">
                     <span className="text-slate-400">60D 协方差矩阵动态求解：</span>
-                    <span className="text-emerald-400 font-bold">自适应计算中 (封顶 ≤{(settings.maxIDM ?? 1.80).toFixed(2)}x)</span>
+                    <span className="text-emerald-400 font-bold">{Math.min(settings.maxIDM ?? 1.80, autoIDM).toFixed(2)}x · 自适应求解 (封顶 ≤{(settings.maxIDM ?? 1.80).toFixed(2)}x)</span>
                   </div>
                 )}
               </div>
@@ -381,6 +392,42 @@ export const CarverPositionSizer: React.FC<CarverPositionSizerProps> = ({
                 跟踪全市场 PE 倒数与 10 年期国债收益率差额。当大盘估值处于历史 80%+ 极度低估黄金坑时，为权益资产注入 1.15x~1.25x 逆向进攻偏置，右侧反弹时享受超额阿尔法。
               </p>
             </div>
+          </div>
+        </div>
+
+        {/* 调仓进阶执行管理：回差调仓与单笔最小调仓金额 */}
+        <div className="mt-3 p-3 rounded-lg border border-slate-800/80 bg-slate-950/50 flex flex-col md:flex-row items-start md:items-center justify-between gap-4">
+          <div className="flex items-center gap-3">
+            <button
+              type="button"
+              onClick={() => onUpdateSettings({ ...settings, hysteresisBuffer: settings.hysteresisBuffer === false ? true : false })}
+              className={`px-2.5 py-1 rounded text-xs font-semibold border transition-colors flex items-center gap-1.5 ${
+                settings.hysteresisBuffer !== false
+                  ? 'bg-indigo-600 text-white border-indigo-500'
+                  : 'bg-slate-800 text-slate-400 border-slate-700'
+              }`}
+            >
+              <span>{settings.hysteresisBuffer !== false ? '✓ 已启用回差调仓 (Hysteresis)' : '已停用回差调仓'}</span>
+            </button>
+            <span className="text-[11px] text-slate-400">
+              触发缓冲越界后<strong>只调至缓冲边界</strong>，杜绝在死区边缘来回拉锯振荡，实盘节省约 30% 换手滑点。
+            </span>
+          </div>
+
+          <div className="flex items-center gap-3 shrink-0 text-xs">
+            <span className="text-slate-300 font-medium">单笔最小调仓金额:</span>
+            <input
+              type="range"
+              min="500"
+              max="10000"
+              step="500"
+              value={settings.minTradeAmount ?? 2000}
+              onChange={(e) => onUpdateSettings({ ...settings, minTradeAmount: Number(e.target.value) })}
+              className="w-24 accent-indigo-500 bg-slate-800 h-1.5 rounded cursor-pointer"
+            />
+            <span className="font-mono text-indigo-400 font-semibold w-16 text-right">
+              ¥{(settings.minTradeAmount ?? 2000).toLocaleString('zh-CN')}
+            </span>
           </div>
         </div>
 
