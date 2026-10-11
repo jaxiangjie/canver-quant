@@ -640,7 +640,7 @@ export const InstrumentDeepAnalysisPanel: React.FC<InstrumentDeepAnalysisPanelPr
             </div>
           </div>
 
-          {/* 历史 3 年 PE/PB 估值分位区间图谱 (利用 historicalValuation 字段展示相对于历史 3 年的区间与三色带) */}
+          {/* 历史价格分位区间图谱（基于真实后复权收盘价，由 parquet bars 派生，非合成 PE/PB 估值） */}
           <HistoricalValuationRangeChart
             historicalValuation={selectedItem.instrument.historicalValuation}
             instrument={selectedItem.instrument}
