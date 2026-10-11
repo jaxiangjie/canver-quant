@@ -10,7 +10,7 @@ import { computeUniverseCorrelationMatrix } from './correlationEngine';
 
 export const DEFAULT_CARVER_SETTINGS: CarverSettings = {
   totalCapital: 1000000,         // 100 万元
-  targetAnnualVol: 0.12,         // 12% 目标年化波动率
+  targetAnnualVol: 0.18,         // 18% 目标年化波动率（匹配 poorlab 11 腿池 σ_T≈18–22% 画像；受 20% 杠杆帽约束）
   bufferThreshold: 0.12,         // 12% 缓冲带死区
   maxInstrumentRiskCap: 0.25,    // 单标的风险权重上限 25%
   maxLeverage: 0.20,             // 最多 20% 杠杆 (即组合总市值最多 120% / 1.20x，杜绝 170%+ 杠杆)

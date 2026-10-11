@@ -117,6 +117,21 @@ export interface CarverSettings {
   slippageBps: number;           // 滑点基点，默认 5 bps
 }
 
+// ──────────────────────────────────────────────────────────────
+// 标的组合（bundle）：把若干标的 + 各自风险预算权重打包成一个可切换的测试宇宙
+// ──────────────────────────────────────────────────────────────
+export interface BundleItem {
+  id: string;               // 标的物 id（与 AShareInstrument.id 对应，通常为 6 位代码）
+  riskBudgetWeight: number; // 该标的在本组合中的风险预算权重 (0 - 1)
+}
+
+export interface InstrumentBundle {
+  id: string;
+  name: string;
+  description?: string;
+  items: BundleItem[];
+}
+
 export interface PositionCalculation {
   instrument: AShareInstrument;
   currentShares: number;
