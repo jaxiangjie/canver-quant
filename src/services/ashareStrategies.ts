@@ -131,6 +131,58 @@ export function generate3YearValuationHistory(instrument: Partial<AShareInstrume
 }
 
 /**
+ * 基于真实后复权收盘价的历史「价格分位」轨迹 —— 替代原合成 PE/PB 估值分位。
+ *
+ * 数据诚信：本函数不引入任何虚构的"宏观周期"，全部由 instrument.bars（真实 parquet 行情）派生。
+ * - 仅当 bars 为真实行情（样本 >= 60 根）时返回数据；缺失 / 过短返回 []，由调用方呈现"无真实数据"空态。
+ * - 取最近 3 年（约 750 交易日）范围内的季末样本点；每个样本点的分位 = 其收盘价在各自回看窗口内的百分位：
+ *     pePercentile  → 近 1 年（250 日）窗口分位（短期相对位置）
+ *     pbPercentile  → 近 3 年（750 日，或全样本）窗口分位（长期相对位置）
+ *   双轨分别刻画"短期 vs 长期"相对位置，均为真实价格派生，无合成假设。
+ */
+export function generatePricePercentileHistory(instrument: Partial<AShareInstrument>): HistoricalValuationPoint[] {
+  const bars = instrument?.bars;
+  if (!Array.isArray(bars) || bars.length < 60) return [];
+
+  const sorted = [...bars].sort(
+    (a, b) => new Date(a.tradeDate).getTime() - new Date(b.tradeDate).getTime()
+  );
+  const closes = sorted.map((b) => b.close);
+  const dates = sorted.map((b) => b.tradeDate);
+
+  // 取最近 3 年（750 交易日）范围内的季末样本（约每 63 日一季）
+  const startIdx = Math.max(0, sorted.length - 750);
+  const sampleSet = Array.from(
+    new Set(
+      Array.from({ length: sorted.length - startIdx }, (_, k) => startIdx + k).filter(
+        (i) => i === sorted.length - 1 || (i - startIdx) % 63 === 0
+      )
+    )
+  );
+
+  const pctOf = (value: number, lo: number, hi: number): number => {
+    if (hi <= lo) return 50;
+    return Math.max(1, Math.min(99, Math.round(((value - lo) / (hi - lo)) * 100)));
+  };
+
+  return sampleSet.map((i) => {
+    const close = closes[i];
+    const win1 = closes.slice(Math.max(0, i - 250), i + 1);
+    const pePct = pctOf(close, Math.min(...win1), Math.max(...win1));
+    const win3 = closes.slice(Math.max(0, i - 750), i + 1);
+    const pbPct = pctOf(close, Math.min(...win3), Math.max(...win3));
+    return {
+      date: dates[i],
+      pe: close, // 复用 pe/pb 字段承载真实收盘价
+      pb: close,
+      pePercentile: pePct,
+      pbPercentile: pbPct,
+      compositePercentile: Math.round((pePct + pbPct) / 2),
+    };
+  });
+}
+
+/**
  * Exponential Moving Average
  */
 function calculateEMA(values: number[], span: number): number[] {
@@ -291,7 +343,7 @@ export function evaluateAShareStrategies(
     positionAdjustmentSuggestion = '纯债与大宗商品无固定市盈率，按大类资产宏观波动率平价进行配置';
   }
 
-  const history5y = generate5YearValuationHistory(instrument);
+  const history5y = generatePricePercentileHistory(instrument);
 
   const valuationSignal: ValuationPercentileSignal = {
     peTTM,
