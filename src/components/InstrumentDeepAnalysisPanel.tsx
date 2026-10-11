@@ -8,7 +8,7 @@ import {
   computeUniverseAnalytics, 
   CHINA_10Y_BOND_YIELD 
 } from '../services/assetAnalyticsEngine';
-import { generate5YearValuationHistory } from '../services/ashareStrategies';
+import { generatePricePercentileHistory } from '../services/ashareStrategies';
 import { ValueMomentumScatterMatrix } from './ValueMomentumScatterMatrix';
 import { InstrumentPriceTrendChart } from './InstrumentPriceTrendChart';
 import { ValuationHistoryChart } from './ValuationHistoryChart';
@@ -69,7 +69,7 @@ export const InstrumentDeepAnalysisPanel: React.FC<InstrumentDeepAnalysisPanelPr
   // Selected Instrument 5-Year Valuation History
   const valuationHistory5Y = useMemo(() => {
     if (!selectedItem?.instrument) return [];
-    return generate5YearValuationHistory(selectedItem.instrument);
+    return generatePricePercentileHistory(selectedItem.instrument);
   }, [selectedItem]);
 
   // Simulated Metrics for Selected Instrument

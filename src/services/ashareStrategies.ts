@@ -343,7 +343,7 @@ export function evaluateAShareStrategies(
     positionAdjustmentSuggestion = '纯债与大宗商品无固定市盈率，按大类资产宏观波动率平价进行配置';
   }
 
-  const history5y = generate5YearValuationHistory(instrument);
+  const history5y = generatePricePercentileHistory(instrument);
 
   const valuationSignal: ValuationPercentileSignal = {
     peTTM,

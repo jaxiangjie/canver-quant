@@ -29,6 +29,7 @@ export const ValuationHistoryChart: React.FC<ValuationHistoryChartProps> = ({
   currentComposite,
 }) => {
   const safeData = Array.isArray(data) ? data : [];
+  const lastDataPoint = safeData.length > 0 ? safeData[safeData.length - 1] : null;
   const containerRef = useRef<HTMLDivElement | null>(null);
   const svgRef = useRef<SVGSVGElement | null>(null);
   const [metricMode, setMetricMode] = useState<'composite' | 'both' | 'pe' | 'pb'>('composite');
@@ -78,11 +79,11 @@ export const ValuationHistoryChart: React.FC<ValuationHistoryChartProps> = ({
 
     // 1. Draw Valuation Zone Colored Background Bands
     const zones = [
-      { y0: 80, y1: 100, fill: 'rgba(239, 68, 68, 0.08)', label: '极度泡沫 (>80%)', textFill: '#F87171' },
-      { y0: 65, y1: 80, fill: 'rgba(245, 158, 11, 0.05)', label: '偏高风险 (65-80%)', textFill: '#FBBF24' },
-      { y0: 40, y1: 65, fill: 'rgba(148, 163, 184, 0.03)', label: '合理中枢 (40-65%)', textFill: '#94A3B8' },
-      { y0: 20, y1: 40, fill: 'rgba(16, 185, 129, 0.05)', label: '低估区间 (20-40%)', textFill: '#34D399' },
-      { y0: 0, y1: 20, fill: 'rgba(16, 185, 129, 0.12)', label: '极低估安全边际 (<20%)', textFill: '#10B981' },
+      { y0: 80, y1: 100, fill: 'rgba(239, 68, 68, 0.08)', label: '高位区 (>80%)', textFill: '#F87171' },
+      { y0: 65, y1: 80, fill: 'rgba(245, 158, 11, 0.05)', label: '中高区 (65-80%)', textFill: '#FBBF24' },
+      { y0: 40, y1: 65, fill: 'rgba(148, 163, 184, 0.03)', label: '中位区 (40-65%)', textFill: '#94A3B8' },
+      { y0: 20, y1: 40, fill: 'rgba(16, 185, 129, 0.05)', label: '低位区 (20-40%)', textFill: '#34D399' },
+      { y0: 0, y1: 20, fill: 'rgba(16, 185, 129, 0.12)', label: '极低位区 (<20%)', textFill: '#10B981' },
     ];
 
     zones.forEach(z => {
@@ -317,11 +318,11 @@ export const ValuationHistoryChart: React.FC<ValuationHistoryChartProps> = ({
           <div className="flex items-center gap-2">
             <Calendar className="w-4 h-4 text-emerald-400" />
             <h4 className="text-sm font-bold text-white">
-              {instrumentName} ({instrumentCode}) · 过去 5 年历史 PE/PB 估值百分位走势图 (D3驱动)
+              {instrumentName} ({instrumentCode}) · 近 3 年历史价格相对分位走势图 (D3驱动)
             </h4>
           </div>
           <p className="text-xs text-slate-400 mt-0.5">
-            直观对比当前估值在 2021-2026 年完整宏观周期中的相对高低位置，识破极端泡沫与极值黄金坑。
+            基于真实后复权收盘价，对比当前价格在近 1 年 / 近 3 年窗口中的相对高低位置（价格相对分位，非基本面估值）。
           </p>
         </div>
 
@@ -335,7 +336,7 @@ export const ValuationHistoryChart: React.FC<ValuationHistoryChartProps> = ({
                 : 'text-slate-400 hover:text-slate-200'
             }`}
           >
-            综合估值分位 (PE+PB)
+            价格综合分位 (1年+3年)
           </button>
           <button
             onClick={() => setMetricMode('pe')}
@@ -345,7 +346,7 @@ export const ValuationHistoryChart: React.FC<ValuationHistoryChartProps> = ({
                 : 'text-slate-400 hover:text-slate-200'
             }`}
           >
-            市盈率 (PE-TTM)
+            近1年相对分位
           </button>
           <button
             onClick={() => setMetricMode('pb')}
@@ -355,7 +356,7 @@ export const ValuationHistoryChart: React.FC<ValuationHistoryChartProps> = ({
                 : 'text-slate-400 hover:text-slate-200'
             }`}
           >
-            市净率 (PB)
+            近3年相对分位
           </button>
           <button
             onClick={() => setMetricMode('both')}
@@ -365,7 +366,7 @@ export const ValuationHistoryChart: React.FC<ValuationHistoryChartProps> = ({
                 : 'text-slate-400 hover:text-slate-200'
             }`}
           >
-            PE/PB 对比双线
+            双窗口对比
           </button>
         </div>
       </div>
@@ -384,60 +385,69 @@ export const ValuationHistoryChart: React.FC<ValuationHistoryChartProps> = ({
             }}
           >
             <div className="font-sans font-bold text-white border-b border-slate-800 pb-1 flex justify-between">
-              <span>{hoveredPoint.date} 历史估值</span>
+              <span>{hoveredPoint.date} 价格相对分位</span>
               <span className="text-[10px] text-slate-400">
-                {hoveredPoint.compositePercentile < 20 ? '极低估' : hoveredPoint.compositePercentile > 80 ? '极泡沫' : '正常'}
+                {hoveredPoint.compositePercentile < 20 ? '极低位' : hoveredPoint.compositePercentile > 80 ? '高位' : '中位'}
               </span>
             </div>
 
             <div className="flex justify-between items-center text-emerald-400">
-              <span className="font-sans text-slate-400">综合估值分位:</span>
+              <span className="font-sans text-slate-400">价格综合分位:</span>
               <span className="font-bold">{hoveredPoint.compositePercentile}%</span>
             </div>
 
             <div className="flex justify-between items-center text-cyan-400">
-              <span className="font-sans text-slate-400">PE-TTM 分位:</span>
-              <span>{hoveredPoint.pePercentile}% ({hoveredPoint.pe}x)</span>
+              <span className="font-sans text-slate-400">近1年价格分位:</span>
+              <span>{hoveredPoint.pePercentile}%</span>
             </div>
 
             <div className="flex justify-between items-center text-purple-400">
-              <span className="font-sans text-slate-400">市净率 PB 分位:</span>
-              <span>{hoveredPoint.pbPercentile}% ({hoveredPoint.pb}x)</span>
+              <span className="font-sans text-slate-400">近3年价格分位:</span>
+              <span>{hoveredPoint.pbPercentile}%</span>
             </div>
           </div>
         )}
       </div>
 
-      {/* 图例说明与过去 5 年统计特征底条 */}
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-xs font-mono tabular-nums pt-2 border-t border-slate-800/80">
-        <div className="p-2.5 bg-slate-800/30 rounded border border-slate-800/80 flex flex-col gap-0.5">
-          <span className="text-[11px] text-slate-400 font-sans">5年估值最高点 (Peak)</span>
-          <span className="font-bold text-red-400">{maxComposite}% 分位</span>
-          <span className="text-[10px] text-slate-500 font-sans">2021年牛市高潮估值过热</span>
-        </div>
+      {/* 图例说明与近 3 年统计特征底条 */}
+      {safeData.length > 0 && (
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-xs font-mono tabular-nums pt-2 border-t border-slate-800/80">
+          <div className="p-2.5 bg-slate-800/30 rounded border border-slate-800/80 flex flex-col gap-0.5">
+            <span className="text-[11px] text-slate-400 font-sans">近3年价格最高位 (Peak)</span>
+            <span className="font-bold text-red-400">{maxComposite}% 分位</span>
+            <span className="text-[10px] text-slate-500 font-sans">近3年价格相对高位</span>
+          </div>
 
-        <div className="p-2.5 bg-slate-800/30 rounded border border-slate-800/80 flex flex-col gap-0.5">
-          <span className="text-[11px] text-slate-400 font-sans">5年估值最低谷 (Trough)</span>
-          <span className="font-bold text-emerald-400">{minComposite}% 分位</span>
-          <span className="text-[10px] text-slate-500 font-sans">2024年初历史极限安全边际</span>
-        </div>
+          <div className="p-2.5 bg-slate-800/30 rounded border border-slate-800/80 flex flex-col gap-0.5">
+            <span className="text-[11px] text-slate-400 font-sans">近3年价格最低位 (Trough)</span>
+            <span className="font-bold text-emerald-400">{minComposite}% 分位</span>
+            <span className="text-[10px] text-slate-500 font-sans">近3年价格相对低位</span>
+          </div>
 
-        <div className="p-2.5 bg-slate-800/30 rounded border border-slate-800/80 flex flex-col gap-0.5">
-          <span className="text-[11px] text-slate-400 font-sans">5年估值中位数 (Median)</span>
-          <span className="font-bold text-slate-200">{medianComposite}% 分位</span>
-          <span className="text-[10px] text-slate-500 font-sans">历史常态均衡参考位</span>
-        </div>
+          <div className="p-2.5 bg-slate-800/30 rounded border border-slate-800/80 flex flex-col gap-0.5">
+            <span className="text-[11px] text-slate-400 font-sans">近3年价格中位 (Median)</span>
+            <span className="font-bold text-slate-200">{medianComposite}% 分位</span>
+            <span className="text-[10px] text-slate-500 font-sans">历史常态均衡参考位</span>
+          </div>
 
-        <div className="p-2.5 bg-slate-800/30 rounded border border-slate-800/80 flex flex-col gap-0.5">
-          <span className="text-[11px] text-slate-400 font-sans">当前位置 vs 5年极低谷</span>
-          <span className={`font-bold ${currentComposite - minComposite < 15 ? 'text-emerald-400' : 'text-cyan-400'}`}>
-            距谷底 +{Math.max(0, currentComposite - minComposite)}% 分位
-          </span>
-          <span className="text-[10px] text-slate-500 font-sans">
-            {currentComposite < 35 ? '依然贴近历史底部安全区' : '已自底部产生适度修复'}
-          </span>
+          <div className="p-2.5 bg-slate-800/30 rounded border border-slate-800/80 flex flex-col gap-0.5">
+            <span className="text-[11px] text-slate-400 font-sans">当前位置 vs 近3年最低位</span>
+            <span className={`font-bold ${(lastDataPoint?.compositePercentile ?? 50) - minComposite < 15 ? 'text-emerald-400' : 'text-cyan-400'}`}>
+              距低位 +{Math.max(0, (lastDataPoint?.compositePercentile ?? 50) - minComposite)}% 分位
+            </span>
+            <span className="text-[10px] text-slate-500 font-sans">
+              {(lastDataPoint?.compositePercentile ?? 50) < 35 ? '依然贴近近3年价格底部区' : '已自底部产生适度修复'}
+            </span>
+          </div>
         </div>
-      </div>
+      )}
+
+      {/* 真实价格历史缺失时的空态 */}
+      {safeData.length === 0 && (
+        <div className="p-10 text-center text-slate-400 text-sm bg-slate-950/60 border border-slate-800 rounded-lg">
+          暂无真实价格历史数据，无法绘制价格相对分位走势图。
+        </div>
+      )}
     </div>
   );
 };
