@@ -1,13 +1,19 @@
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { existsSync } from 'node:fs';
 import { AShareInstrument, AShareBar } from '../types/ashare';
 import { INITIAL_INSTRUMENTS } from './mockData';
 
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
 /**
- * 真实数据适配器：对接上一级 llmquant 的本地 parquet 数据湖。
+ * 真实数据适配器：对接上一级 llmquant 的本地 parquet 数据契约。
  *
- * llmquant 的"数据获取方式"本质是从
- *   E:\quant-platform\data\parquet\daily\{6位代码}_hfq.parquet
- * 读取后复权日线（字段: date/open/high/low/close/volume/amount/code）。
+ * 默认从项目内嵌数据读取（data/parquet/daily，已随仓库提交，clone 即自包含）：
+ *   {项目根}/data/parquet/daily/{6位代码}_hfq.parquet
+ * 与 llmquant 的数据契约一致（后复权日线，字段: date/open/high/low/close/volume/amount/code）。
+ * 可用环境变量 REAL_DATA_DIR 覆盖为外部大湖（如 E:\quant-platform\data\parquet\daily）。
  * 这里复用同一份数据契约，把后复权日线转成 canver-quant 的 AShareInstrument。
  *
  * 设计：以 src/services/mockData.ts 的 INITIAL_INSTRUMENTS 作为"元数据模板"
@@ -17,8 +23,8 @@ import { INITIAL_INSTRUMENTS } from './mockData';
  * 前端 apiClient 已能 hydrate 真实 bars，因此前端零改动即可呈现真实数据。
  */
 
-// 可用环境变量 REAL_DATA_DIR 覆盖；默认对齐 llmquant settings.PARQUET_DIR
-const PARQUET_DIR = process.env.REAL_DATA_DIR || 'E:/quant-platform/data/parquet/daily';
+// 默认从项目内 data/parquet/daily 加载（数据自包含）；可用 REAL_DATA_DIR 覆盖为外部大湖
+export const PARQUET_DIR = process.env.REAL_DATA_DIR || path.resolve(__dirname, '..', '..', 'data', 'parquet', 'daily');
 
 // hyparquet 为纯 JS parquet 读取器（自带 TS 类型），在 Node 端直接读 llmquant 的本地 parquet
 import { asyncBufferFromFile, parquetReadObjects } from 'hyparquet';

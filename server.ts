@@ -13,7 +13,7 @@ const app = express();
 app.use(express.json({ limit: '20mb' }));
 
 import { INITIAL_INSTRUMENTS } from './src/services/mockData';
-import { loadRealUniverse } from './src/services/realData';
+import { loadRealUniverse, PARQUET_DIR } from './src/services/realData';
 import {
   loadPersistedStore,
   savePersistedStore,
@@ -122,9 +122,7 @@ async function initStore() {
         // 即使 parquet 目录整个不存在也会谎报成功，用户以为在看真实行情。
         const fb = real.filter((i: any) => i?.dataSource === 'fallback').length;
         console.log(
-          `[real-data] loaded ${real.length} instruments from parquet (real=${real.length - fb}, fallback=${fb}) @ ${
-            process.env.REAL_DATA_DIR || 'E:/quant-platform/data/parquet/daily'
-          }`,
+          `[real-data] loaded ${real.length} instruments from parquet (real=${real.length - fb}, fallback=${fb}) @ ${PARQUET_DIR}`,
         );
         if (fb > 0) {
           console.warn(
