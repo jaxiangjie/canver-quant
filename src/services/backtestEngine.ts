@@ -1,5 +1,6 @@
 import { AShareInstrument, BacktestDataPoint, CarverSettings } from '../types/ashare';
 import { calculatePortfolio } from './carverEngine';
+import { loadValuationSeries, getAsOfValuation, ETF_INDEX_MAP } from './valuationStore';
 
 export interface BacktestMetrics {
   carver: StrategyMetrics;
@@ -156,7 +157,7 @@ export function runRealBacktest(
   universe: AShareInstrument[],
   settings: CarverSettings,
   options: RunBacktestOptions = {}
-): { series: BacktestDataPoint[]; metrics: BacktestMetrics } {
+): { series: BacktestDataPoint[]; metrics: BacktestMetrics; valuationTiltTriggers: number } {
   // 排除合成伪数据标的：其 bars 是前端生成的伪随机 K 线，不能参与回测结论
   const safeUniverse = (Array.isArray(universe) ? universe : [])
     .filter(Boolean)
@@ -166,7 +167,7 @@ export function runRealBacktest(
   const minHist = options.minHistoryBars ?? 252;
   const points: BacktestDataPoint[] = [];
   if (safeUniverse.length === 0) {
-    return { series: points, metrics: emptyMetrics(stressLevel, advCapRatio) };
+    return { series: points, metrics: emptyMetrics(stressLevel, advCapRatio), valuationTiltTriggers: 0 };
   }
 
   // 1. 构建 union 交易日轴 + 每只标的在每个 union 日的可用 bars 数量（two-pointer）
@@ -198,11 +199,14 @@ export function runRealBacktest(
   // 早期标的（如 510300 自 2013 起）的历史被白白丢弃，样本期被无谓截断。
   const startIdx = Math.max(0, Math.min(...activeFrom));
   if (startIdx < 0 || startIdx >= unionDates.length - 1) {
-    return { series: points, metrics: emptyMetrics(stressLevel, advCapRatio) };
+    return { series: points, metrics: emptyMetrics(stressLevel, advCapRatio), valuationTiltTriggers: 0 };
   }
 
   // 3. 初始资金与状态
   const totalCap = settings?.totalCapital || 1000000;
+  // 估值历史（闸门④）：指数 pe/pb 月频回补 + 每日快照，用于 as-of 分位注入
+  const valuationSeriesMap = loadValuationSeries();
+  let valuationTiltTriggers = 0;
   const csiInst = safeUniverse.find(i => i.code.startsWith('510300')) || safeUniverse.find(i => i.category === 'broad_etf') || safeUniverse[0];
   const csiIdx = safeUniverse.indexOf(csiInst);
   // 渐进入池后 startIdx 可能早于基准标的自身的激活点，需避免下标为 -1
@@ -281,6 +285,31 @@ export function runRealBacktest(
           snapshotHeld.set(inst.code, heldCarver.get(inst.code) || 0);
         }
       });
+
+      // 闸门④：注入 as-of 估值分位（point-in-time，仅用再平衡日之前的数据，无未来函数）。
+      // 宽基 ETF 映射指数（pe+pb 分位均真实才放行 hasValuation 闸门）；个股无历史 PE → 不给信号（诚实冷启动）。
+      let tiltTriggeredThisRebalance = false;
+      snapshot.forEach(snap => {
+        const six = snap.code.split('.')[0];
+        const key = snap.isETF !== false ? ETF_INDEX_MAP[six] : six;
+        if (!key) return;
+        const av = getAsOfValuation(valuationSeriesMap, key, date);
+        if (av.pePercentile !== undefined) snap.pePercentile = av.pePercentile;
+        if (av.pbPercentile !== undefined) snap.pbPercentile = av.pbPercentile;
+        if (snap.isETF !== false) {
+          snap.peTTM = av.pePercentile !== undefined && av.pe && av.pe > 0 ? av.pe : undefined;
+          snap.pb = av.pbPercentile !== undefined && av.pb && av.pb > 0 ? av.pb : undefined;
+        }
+        if (
+          settings.useERPTilt !== false &&
+          snap.pePercentile != null && snap.pbPercentile != null &&
+          (snap.category === 'broad_etf' || snap.category === 'stock_cn' || snap.category === 'sector_etf')
+        ) {
+          const comp = Math.round(snap.pePercentile * 0.55 + snap.pbPercentile * 0.45);
+          if (comp < 40) tiltTriggeredThisRebalance = true; // EXTREME_LOW(<20) +3.0 / UNDERVALUED(<40) +1.5
+        }
+      });
+      if (tiltTriggeredThisRebalance) valuationTiltTriggers++;
 
       // --- 卡弗策略目标持仓 ---
       const { positions } = calculatePortfolio(snapshot, settings);
@@ -403,7 +432,7 @@ export function runRealBacktest(
     advCapRatio,
   };
 
-  return { series: points, metrics };
+  return { series: points, metrics, valuationTiltTriggers };
 }
 
 function emptyMetrics(stressLevel: string, advCapRatio: number): BacktestMetrics {

@@ -139,6 +139,35 @@ export interface ValuationEnrichReport {
   skipped: number;
 }
 
+export interface AsOfValuation {
+  pePercentile?: number;
+  pbPercentile?: number;
+  pe?: number;
+  pb?: number;
+}
+
+/**
+ * 取某日期时点的估值分位（point-in-time，无未来函数）：
+ * 仅使用 date 之前的序列截断计算，供回测在每次再平衡时按当时可得数据取值。
+ */
+export function getAsOfValuation(
+  seriesMap: Map<string, ValuationPoint[]>,
+  key: string,
+  date: string,
+): AsOfValuation {
+  const series = seriesMap.get(key);
+  if (!series || series.length === 0) return {};
+  const truncated = series.filter((p) => p.date <= date);
+  if (truncated.length === 0) return {};
+  const last = truncated[truncated.length - 1];
+  return {
+    pePercentile: percentileFromSeries(truncated, 'pe'),
+    pbPercentile: percentileFromSeries(truncated, 'pb'),
+    pe: last.pe,
+    pb: last.pb,
+  };
+}
+
 /**
  * 用快照库历史为标的池富化 pePercentile / pbPercentile。
  * - 债/金/QDII：跳过（无意义估值）
