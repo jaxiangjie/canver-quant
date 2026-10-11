@@ -24,6 +24,7 @@ export const ETF_INDEX_MAP: Record<string, string> = {
 const VALUATION_DIR = path.resolve(process.cwd(), 'data', 'valuation');
 const SNAPSHOTS_PATH = path.join(VALUATION_DIR, 'valuation_snapshots.jsonl');
 const INDEX_HISTORY_PATH = path.join(VALUATION_DIR, 'index_pe_history.jsonl');
+const STOCK_HISTORY_PATH = path.join(VALUATION_DIR, 'stock_valuation_history.jsonl');
 
 export interface ValuationSnapshot {
   date: string; // YYYY-MM-DD
@@ -58,7 +59,7 @@ export function appendValuationSnapshots(entries: ValuationSnapshot[]): number {
   ensureDir();
   if (!keyDateCache) {
     keyDateCache = new Set<string>();
-    for (const f of [SNAPSHOTS_PATH, INDEX_HISTORY_PATH]) {
+    for (const f of [SNAPSHOTS_PATH, INDEX_HISTORY_PATH, STOCK_HISTORY_PATH]) {
       if (!fs.existsSync(f)) continue;
       for (const line of fs.readFileSync(f, 'utf-8').split('\n')) {
         if (!line.trim()) continue;
@@ -88,8 +89,8 @@ export function appendValuationSnapshots(entries: ValuationSnapshot[]): number {
 /** 读取全部历史（指数回补 + 每日快照），按 key 分组、按日期排序，同日快照覆盖回补值。 */
 export function loadValuationSeries(): Map<string, ValuationPoint[]> {
   ensureDir();
-  // 顺序：先回补历史、后每日快照 → 同日重复时后者覆盖前者
-  const files = [INDEX_HISTORY_PATH, SNAPSHOTS_PATH];
+  // 顺序：先回补历史（指数→个股）、后每日快照 → 同日重复时后者覆盖前者
+  const files = [INDEX_HISTORY_PATH, STOCK_HISTORY_PATH, SNAPSHOTS_PATH];
   const map = new Map<string, Map<string, ValuationPoint>>();
   for (const f of files) {
     if (!fs.existsSync(f)) continue;

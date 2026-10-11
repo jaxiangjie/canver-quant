@@ -297,6 +297,11 @@ export function runRealBacktest(
         if (av.pePercentile !== undefined) snap.pePercentile = av.pePercentile;
         if (av.pbPercentile !== undefined) snap.pbPercentile = av.pbPercentile;
         if (snap.isETF !== false) {
+          // ETF：以映射指数的 as-of 值充当（自身无 PE/PB）
+          snap.peTTM = av.pePercentile !== undefined && av.pe && av.pe > 0 ? av.pe : undefined;
+          snap.pb = av.pbPercentile !== undefined && av.pb && av.pb > 0 ? av.pb : undefined;
+        } else {
+          // 个股：历史估值来自百度周频回补，as-of 值真实（亏损期 PE 缺失则该分位段自然缩短）
           snap.peTTM = av.pePercentile !== undefined && av.pe && av.pe > 0 ? av.pe : undefined;
           snap.pb = av.pbPercentile !== undefined && av.pb && av.pb > 0 ? av.pb : undefined;
         }
