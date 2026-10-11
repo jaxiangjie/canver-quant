@@ -22,7 +22,7 @@ export const DEFAULT_CARVER_SETTINGS: CarverSettings = {
   idmMode: 'auto',               // 默认动态自适应计算 IDM，支持手动调节
   manualIDM: 1.45,               // 手动设定值（推荐区间 1.20 - 1.80）
   maxIDM: 1.80,                  // IDM 放大倍数上限 1.80
-  useERPTilt: true,              // 启用 A 股股债收益差 ERP 逆向战术偏置
+  useERPTilt: false,             // A股 ERP 逆向战术偏置：闸门④回测(2008-2026,216次再平衡)增量噪声级(Sharpe+0.00)，默认关；重验见 scripts/gate4_compare.ts
   enforceTargetVol: true,        // 目标波动即基准敞口：中性=1.0x 满仓，让目标波动率真正生效（非上限）
   stockCommissionRate: 0.00025,  // 万2.5
   etfCommissionRate: 0.0001,     // 万1
