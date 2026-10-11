@@ -78,6 +78,14 @@ export default function App() {
   const [bundles, setBundles] = useState<InstrumentBundle[]>(() => loadBundles());
   const [activeBundleId, setActiveBundleId] = useState<string>(() => loadActiveId());
 
+  const [isSyncingLatest, setIsSyncingLatest] = useState(false);
+  const [syncToast, setSyncToast] = useState<{ type: 'success' | 'info' | 'error'; message: string } | null>(null);
+
+  // 计算当前数据宇宙的最大实际交易日
+  const latestTradeDate = useMemo(() => {
+    return AShareDataService.getLatestTradeDate(universe);
+  }, [universe]);
+
   // Initialize data on mount
   useEffect(() => {
     async function init() {
@@ -85,6 +93,21 @@ export default function App() {
       try {
         const loaded = await AShareDataService.loadInstruments();
         setUniverse(loaded);
+        // 后台静默检测并增量拉取全市场最新交易日行情
+        AShareDataService.syncLatestMarketData()
+          .then(syncRes => {
+            if (syncRes.instruments?.length) {
+              setUniverse(syncRes.instruments);
+              if (syncRes.report.updatedCount > 0) {
+                setSyncToast({
+                  type: 'info',
+                  message: `已自动增量同步至最新交易日: ${syncRes.report.latestTradingDate} (${syncRes.report.updatedCount} 只标的更新)`,
+                });
+                setTimeout(() => setSyncToast(null), 4000);
+              }
+            }
+          })
+          .catch(e => console.warn('[App] initial sync skipped:', e));
       } catch (err) {
         console.error('Failed to load instruments', err);
       } finally {
@@ -187,26 +210,31 @@ export default function App() {
     });
   };
 
-  const handleRefreshData = async () => {
+  const handleSyncLatest = async () => {
+    setIsSyncingLatest(true);
     setIsRefreshing(true);
     try {
-      // Simulate slight closing drift or fetch live API
-      const updated = universe.map(inst => {
-        const randDrift = (Math.random() - 0.48) * 0.008;
-        const newPrice = Number(Math.max(0.1, inst.currentPrice * (1 + randDrift)).toFixed(3));
-        const newPct = Number((((newPrice - inst.preClose) / inst.preClose) * 100).toFixed(2));
-        return {
-          ...inst,
-          currentPrice: newPrice,
-          changePct: newPct,
-        };
+      const res = await AShareDataService.syncLatestMarketData();
+      setUniverse(res.instruments);
+      const rep = res.report;
+      setSyncToast({
+        type: 'success',
+        message: `成功同步 ${rep.updatedCount}/${rep.totalInstruments} 只标的至 ${rep.latestTradingDate || '最新交易日'}，波动率与目标仓位已自动重算！`,
       });
-      setUniverse(updated);
-      await AShareDataService.saveInstruments(updated);
+      setTimeout(() => setSyncToast(null), 5000);
+    } catch (err: any) {
+      setSyncToast({
+        type: 'error',
+        message: `行情同步失败: ${err?.message || '网络连接超时'}`,
+      });
+      setTimeout(() => setSyncToast(null), 5000);
     } finally {
-      setTimeout(() => setIsRefreshing(false), 500);
+      setIsSyncingLatest(false);
+      setIsRefreshing(false);
     }
   };
+
+  const handleRefreshData = handleSyncLatest;
 
   if (isLoading) {
     return (
@@ -220,7 +248,7 @@ export default function App() {
   }
 
   return (
-    <div className="min-h-screen bg-[#090D16] text-slate-100 flex flex-col font-sans selection:bg-emerald-500 selection:text-white">
+    <div className="min-h-screen bg-[#090D16] text-slate-100 flex flex-col font-sans selection:bg-emerald-500 selection:text-white relative">
       {/* 顶部标准三区导航 */}
       <Header
         activeTab={activeTab}
@@ -234,6 +262,9 @@ export default function App() {
         onRefreshData={handleRefreshData}
         isRefreshing={isRefreshing}
         maxLeverageLimitPct={summary.maxLeverageLimitPct}
+        latestTradeDate={latestTradeDate}
+        isSyncingLatest={isSyncingLatest}
+        onSyncLatest={handleSyncLatest}
       />
 
       {/* 组合（bundle）切换条：任意换一组打包组合后的标的进行测试 */}
@@ -304,6 +335,9 @@ export default function App() {
           <DataAdapterConsole
             universe={universe}
             onUniverseUpdated={setUniverse}
+            latestTradeDate={latestTradeDate}
+            onSyncLatest={handleSyncLatest}
+            isSyncingLatest={isSyncingLatest}
           />
         )}
 
@@ -311,6 +345,26 @@ export default function App() {
           <DocumentationCenter />
         )}
       </main>
+
+      {/* 实时行情同步状态悬浮提示 */}
+      {syncToast && (
+        <div className={`fixed bottom-6 right-6 z-50 px-4 py-3 rounded-lg border shadow-2xl flex items-center gap-3 text-xs font-sans transition-all animate-bounce ${
+          syncToast.type === 'success'
+            ? 'bg-emerald-950/95 text-emerald-200 border-emerald-500/60 shadow-emerald-950/50'
+            : syncToast.type === 'error'
+            ? 'bg-rose-950/95 text-rose-200 border-rose-500/60 shadow-rose-950/50'
+            : 'bg-slate-900/95 text-slate-200 border-slate-700 shadow-slate-950/50'
+        }`}>
+          <span className={`w-2 h-2 rounded-full ${syncToast.type === 'success' ? 'bg-emerald-400' : syncToast.type === 'error' ? 'bg-rose-400' : 'bg-cyan-400'} animate-ping`} />
+          <span className="font-medium">{syncToast.message}</span>
+          <button
+            onClick={() => setSyncToast(null)}
+            className="ml-2 text-slate-400 hover:text-white text-xs px-1 hover:bg-slate-800 rounded"
+          >
+            ✕
+          </button>
+        </div>
+      )}
 
       {/* 添加标的模态窗口 */}
       <AddInstrumentModal

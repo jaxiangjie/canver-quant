@@ -21,6 +21,7 @@ import {
   storePathExists,
   mergeStores,
 } from './src/services/persistence';
+import { syncAllInstruments } from './src/services/liveMarketSync';
 
 // In-memory data store for A-Share instruments (real parquet data if available, else mock)
 let instrumentsStore: any[] = [];
@@ -30,12 +31,69 @@ app.get('/api/ashare/instruments', (_req, res) => {
   res.json(instrumentsStore);
 });
 
+// 数据时效与覆盖率检测
+app.get('/api/ashare/freshness', (_req, res) => {
+  let maxTradeDate = '';
+  for (const inst of instrumentsStore) {
+    if (Array.isArray(inst.bars) && inst.bars.length > 0) {
+      const d = inst.bars[inst.bars.length - 1].tradeDate;
+      if (d && (!maxTradeDate || d > maxTradeDate)) {
+        maxTradeDate = d;
+      }
+    }
+  }
+  const fallbackCount = instrumentsStore.filter((i: any) => i?.dataSource === 'fallback' || i?.syntheticBars).length;
+  res.json({
+    maxTradeDate,
+    totalCount: instrumentsStore.length,
+    realCount: instrumentsStore.length - fallbackCount,
+    fallbackCount,
+  });
+});
+
+// 在线增量拉取最新交易日数据并同步 (GET)
+app.get('/api/ashare/sync-latest', async (_req, res) => {
+  try {
+    const { updatedInstruments, report } = await syncAllInstruments(instrumentsStore);
+    if (updatedInstruments.length > 0) {
+      instrumentsStore = updatedInstruments;
+      savePersistedStore(instrumentsStore, 'sync-latest');
+    }
+    res.json({
+      success: true,
+      report,
+      instruments: instrumentsStore,
+    });
+  } catch (err: any) {
+    console.error('[sync-latest] failed:', err);
+    res.status(500).json({ success: false, message: err?.message || 'Sync failed' });
+  }
+});
+
+// 在线增量拉取最新交易日数据并同步 (POST 可支持指定代码)
+app.post('/api/ashare/sync-latest', async (req, res) => {
+  try {
+    const targetCodes: string[] | null = Array.isArray(req.body?.codes) ? req.body.codes : null;
+    let pool = instrumentsStore;
+    if (targetCodes && targetCodes.length > 0) {
+      pool = instrumentsStore.filter(i => targetCodes.includes(i.code) || targetCodes.includes(i.id));
+    }
+    const { updatedInstruments, report } = await syncAllInstruments(pool);
+    const codeMap = new Map(updatedInstruments.map(u => [u.id, u]));
+    instrumentsStore = instrumentsStore.map(i => codeMap.get(i.id) || i);
+    savePersistedStore(instrumentsStore, 'sync-latest');
+    res.json({ success: true, report, instruments: instrumentsStore });
+  } catch (err: any) {
+    res.status(500).json({ success: false, message: err?.message || 'Sync failed' });
+  }
+});
+
 app.post('/api/ashare/ingest', (req, res) => {
   try {
     const { instruments } = req.body;
     if (Array.isArray(instruments) && instruments.length > 0) {
+      savePersistedStore(instruments, 'ingest'); // 先原子落盘，失败则直接抛错不污染内存
       instrumentsStore = instruments;
-      savePersistedStore(instruments, 'ingest'); // 落盘，重启后合并覆盖
       res.json({ success: true, count: instruments.length, message: '数据接入成功（已持久化）' });
     } else {
       res.status(400).json({ success: false, message: 'Invalid payload: instruments array required' });
@@ -45,10 +103,22 @@ app.post('/api/ashare/ingest', (req, res) => {
   }
 });
 
-// 清空持久化 store（下次重启重新从 parquet 加载真实数据）
-app.delete('/api/ashare/store', (_req, res) => {
-  const removed = deletePersistedStore();
-  res.json({ success: true, removed, message: removed ? '持久化数据已清除' : '无持久化数据' });
+// 清空持久化 store 并重置内存态为原生行情池
+app.delete('/api/ashare/store', async (_req, res) => {
+  try {
+    const removed = deletePersistedStore();
+    if (removed) {
+      try {
+        const real = await loadRealUniverse();
+        instrumentsStore = real.length ? real : INITIAL_INSTRUMENTS;
+      } catch {
+        instrumentsStore = INITIAL_INSTRUMENTS;
+      }
+    }
+    res.json({ success: true, removed, message: removed ? '持久化数据已清除并重置为原生基础池' : '无持久化数据' });
+  } catch (err: any) {
+    res.status(500).json({ success: false, message: err?.message || 'Server error' });
+  }
 });
 
 // SSRF 防护：仅允许显式白名单内的主机通过服务端代理请求。

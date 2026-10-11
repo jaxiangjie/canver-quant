@@ -24,6 +24,9 @@ interface HeaderProps {
   onRefreshData: () => void;
   isRefreshing: boolean;
   maxLeverageLimitPct?: number;
+  latestTradeDate?: string;
+  isSyncingLatest?: boolean;
+  onSyncLatest?: () => void;
 }
 
 export const Header: React.FC<HeaderProps> = ({
@@ -37,7 +40,10 @@ export const Header: React.FC<HeaderProps> = ({
   onOpenAddModal,
   onRefreshData,
   isRefreshing,
-  maxLeverageLimitPct = 20
+  maxLeverageLimitPct = 20,
+  latestTradeDate,
+  isSyncingLatest = false,
+  onSyncLatest,
 }) => {
   return (
     <header className="flex items-center justify-between gap-8 px-6 py-3.5 bg-[#0D131F] border-b border-slate-800 text-slate-200">
@@ -154,18 +160,30 @@ export const Header: React.FC<HeaderProps> = ({
           </div>
         )}
 
+        {latestTradeDate && (
+          <div className="hidden lg:flex items-center gap-1.5 text-[11px] font-mono px-2.5 py-1 bg-slate-900/90 rounded border border-slate-700/70 text-slate-300">
+            <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+            <span className="text-slate-400">行情至:</span>
+            <span className="text-emerald-400 font-semibold">{latestTradeDate}</span>
+          </div>
+        )}
+
         <div className="hidden 2xl:flex items-center gap-1.5 text-[11px] text-emerald-400 font-mono px-2.5 py-1 bg-emerald-950/40 rounded border border-emerald-800/40">
           <span>🛡️ 杠杆上限 ≤{maxLeverageLimitPct}%</span>
         </div>
 
         <button
-          onClick={onRefreshData}
-          disabled={isRefreshing}
-          title="重新计算行情与卡弗标量"
-          className="flex items-center gap-1.5 px-3 py-1.5 text-xs text-slate-300 bg-slate-800/80 hover:bg-slate-700 hover:text-white rounded border border-slate-700 transition-colors whitespace-nowrap"
+          onClick={onSyncLatest || onRefreshData}
+          disabled={isSyncingLatest || isRefreshing}
+          title="在线拉取最新真实交易日行情数据 (OHLCV、ATR与波动率)"
+          className={`flex items-center gap-1.5 px-3 py-1.5 text-xs rounded border transition-all whitespace-nowrap cursor-pointer ${
+            isSyncingLatest
+              ? 'bg-emerald-950/80 text-emerald-300 border-emerald-500/60'
+              : 'bg-emerald-600/20 hover:bg-emerald-600/30 text-emerald-300 hover:text-white border-emerald-500/40 shadow-sm'
+          }`}
         >
-          <RefreshCw className={`w-3.5 h-3.5 ${isRefreshing ? 'animate-spin' : ''}`} />
-          <span className="hidden sm:inline">日终刷新</span>
+          <RefreshCw className={`w-3.5 h-3.5 text-emerald-400 ${(isSyncingLatest || isRefreshing) ? 'animate-spin' : ''}`} />
+          <span>{isSyncingLatest ? '正在同步最新日线...' : '同步最新行情'}</span>
         </button>
 
         <button

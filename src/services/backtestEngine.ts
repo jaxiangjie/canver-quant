@@ -237,6 +237,10 @@ export function runRealBacktest(
   const stampRate = (inst: AShareInstrument, action: 'BUY' | 'SELL') =>
     (!inst.stampDutyExempt && action === 'SELL') ? settings.stockStampDuty : 0;
 
+  // 运行期累计最高净值（用于 O(1) 增量计算回撤，避免每日全表扫描 O(N^2) 导致界面卡顿）
+  let maxCarverPeak = 1.0;
+  let maxCsiPeak = 1.0;
+
   // 4. 主循环
   for (let i = startIdx; i < unionDates.length; i++) {
     const date = unionDates[i];
@@ -369,9 +373,11 @@ export function runRealBacktest(
     const eqEw = navEw / totalCap;
     const eqCsi = navCsi / totalCap;
 
-    // 回撤（基于截至今日的峰值）
-    const carverPeak = Math.max(...points.map(p => p.carverStrategyEquity), eqProt);
-    const csiPeak = Math.max(...points.map(p => p.csi300Equity), eqCsi);
+    // 回撤（基于截至今日的峰值，O(1) 增量更新）
+    if (eqProt > maxCarverPeak) maxCarverPeak = eqProt;
+    if (eqCsi > maxCsiPeak) maxCsiPeak = eqCsi;
+    const carverPeak = maxCarverPeak;
+    const csiPeak = maxCsiPeak;
 
     points.push({
       date,

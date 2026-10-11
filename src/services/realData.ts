@@ -48,6 +48,10 @@ function stdSample(a: number[]): number {
 
 function normDate(d: unknown): string {
   if (d instanceof Date) return d.toISOString().slice(0, 10);
+  if (typeof d === 'number') {
+    const ms = d < 1e11 ? d * 1000 : d;
+    return new Date(ms).toISOString().slice(0, 10);
+  }
   return String(d).slice(0, 10);
 }
 
@@ -133,6 +137,17 @@ export async function loadRealUniverse(): Promise<AShareInstrument[]> {
       (atr20[last] || (currentPrice * annualizedVol) / 15.8).toFixed(4),
     );
 
+    // 前缀和加速：O(1) 滚动均线，避免 3000根×3均线 产生千万级 slice().map()
+    const prefixCloseSum: number[] = [0];
+    for (let i = 0; i < n; i++) {
+      prefixCloseSum.push(prefixCloseSum[i] + closes[i]);
+    }
+    const rollingMA = (idx: number, window: number): number | undefined => {
+      if (idx < window - 1) return undefined;
+      const sum = prefixCloseSum[idx + 1] - prefixCloseSum[idx + 1 - window];
+      return Number((sum / window).toFixed(3));
+    };
+
     const bars: AShareBar[] = rows.map((r, i) => {
       const close = Number(r.close);
       const open = Number(r.open);
@@ -154,18 +169,9 @@ export async function loadRealUniverse(): Promise<AShareInstrument[]> {
         // （旧实现用合成的 成交量×价/100 并四舍五入，早期小成交额样本会被取整为 0）
         turnover: Number((amt / 10000).toFixed(0)),
         changePct: Number((((close - pc) / pc) * 100).toFixed(2)),
-        ma20:
-          i >= 19
-            ? Number(mean(rows.slice(i - 19, i + 1).map((x) => Number(x.close))).toFixed(3))
-            : undefined,
-        ma60:
-          i >= 59
-            ? Number(mean(rows.slice(i - 59, i + 1).map((x) => Number(x.close))).toFixed(3))
-            : undefined,
-        ma250:
-          i >= 249
-            ? Number(mean(rows.slice(i - 249, i + 1).map((x) => Number(x.close))).toFixed(3))
-            : undefined,
+        ma20: rollingMA(i, 20),
+        ma60: rollingMA(i, 60),
+        ma250: rollingMA(i, 250),
         atr20: i >= 20 ? Number(atr20[i].toFixed(3)) : undefined,
       };
     });

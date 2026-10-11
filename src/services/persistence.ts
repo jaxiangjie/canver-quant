@@ -17,7 +17,7 @@ const TEMPLATE_CODES = new Set(INITIAL_INSTRUMENTS.map((i) => i.code));
 export interface PersistedStore {
   version: number;
   savedAt: string;
-  source: 'ingest' | 'manual';
+  source: 'ingest' | 'manual' | 'sync-latest';
   instruments: any[];
   deletedCodes?: string[]; // 用户删除的模板标的 code（重启后不得因 mergeStores 而复活）
 }
@@ -46,15 +46,19 @@ export function loadPersistedStore(): PersistedStore | null {
  * 2. 记录 deletedCodes —— 用户删除的模板标的，避免 mergeStores「只增不减」让它重启复活。
  * 3. 原子写：先写 .tmp 再 rename，避免进程中断/磁盘满留下半截 JSON 导致全部编辑静默丢失。
  */
-export function savePersistedStore(instruments: any[], source: 'ingest' | 'manual' = 'ingest'): void {
+export function savePersistedStore(
+  instruments: any[],
+  source: 'ingest' | 'manual' | 'sync-latest' = 'ingest',
+): void {
   ensureDataDir();
   const list = Array.isArray(instruments) ? instruments : [];
   const slim = list.map((inst: any) => {
-    if (TEMPLATE_CODES.has(inst?.code)) {
+    // 仅在属于初始模板且不是实时同步数据时剥离 bars；实时同步数据保留 bars 避免重启丢失
+    if (TEMPLATE_CODES.has(inst?.code) && inst?.dataSource !== 'realtime_synced') {
       const { bars, ...rest } = inst;
       return rest;
     }
-    return inst; // 自定义标的：保留 bars，避免重启后被合成为伪数据
+    return inst; // 自定义标的或已实时同步标的：保留 bars，避免重启后被合成为伪数据
   });
 
   // 仅在有数据时才记录删除，避免空列表把全部模板标的误判为"已删除"

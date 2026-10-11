@@ -101,10 +101,10 @@ export function calculateInstrumentPosition(
   // 传统择时(enforceTargetVol=false): 仅正信号持仓，中性/负=0 空仓防御（原 Carver 趋势语义）
   let scalarMultiplier = 0;
   if (instrument.category === 'bond_etf') {
-    // 债券 ETF 压舱石：保留 0.8x 下限
+    // 债券 ETF 压舱石：保留 0.8x 下限与 2.0x 杠杆封顶
     scalarMultiplier = settings.enforceTargetVol !== false
-      ? Math.max(0.8, (scalar + 20) / 20)
-      : Math.max(0.8, (scalar + 10) / 10);
+      ? Math.max(0.8, Math.min(2.0, (scalar + 20) / 20))
+      : Math.max(0.8, Math.min(2.0, (scalar + 10) / 10));
   } else if (settings.enforceTargetVol !== false) {
     scalarMultiplier = Math.max(0, Math.min(2.0, (scalar + 20) / 20));
   } else if (scalar > 0) {
@@ -231,7 +231,7 @@ export function calculatePortfolio(
   let computedIDM = 1.0;
   if (safeUniverse.length > 1 && settings.useIDM !== false) {
     if (settings.idmMode === 'manual' && typeof settings.manualIDM === 'number') {
-      computedIDM = Math.max(1.0, Math.min(settings.maxIDM || 2.20, settings.manualIDM));
+      computedIDM = Math.max(1.0, Math.min(settings.maxIDM || 1.80, settings.manualIDM));
     } else {
       computedIDM = Math.max(1.0, Math.min(settings.maxIDM || 1.80, corrResult?.carverIDM || 1.45));
     }

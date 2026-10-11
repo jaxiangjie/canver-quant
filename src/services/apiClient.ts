@@ -1,6 +1,7 @@
 import { AShareInstrument, ExternalDataAdapterConfig } from '../types/ashare';
 import { INITIAL_INSTRUMENTS, generateHistoricalBars } from './mockData';
 import { generate3YearValuationHistory } from './ashareStrategies';
+import { syncAllInstruments, SyncReport } from './liveMarketSync';
 
 const LOCAL_STORAGE_KEY = 'carver_ashare_universe_v3';
 const DATA_CONFIG_KEY = 'carver_data_adapter_config_v1';
@@ -189,5 +190,56 @@ export class AShareDataService {
     const seed = INITIAL_INSTRUMENTS.map(hydrateInstrument);
     localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(seed));
     return seed;
+  }
+
+  /**
+   * 获取当前本地/内存宇宙的最大交易日
+   */
+  static getLatestTradeDate(instruments: AShareInstrument[]): string {
+    let maxDate = '';
+    for (const inst of instruments) {
+      if (Array.isArray(inst.bars) && inst.bars.length > 0) {
+        const d = inst.bars[inst.bars.length - 1].tradeDate;
+        if (d && (!maxDate || d > maxDate)) {
+          maxDate = d;
+        }
+      }
+    }
+    return maxDate;
+  }
+
+  /**
+   * 在线增量同步最新交易日行情数据
+   * 优先通过服务端 /api/ashare/sync-latest 获取，落盘持久化；若网络或服务端离线则在客户端回退直接同步
+   */
+  static async syncLatestMarketData(options?: { codes?: string[] }): Promise<{
+    report: SyncReport;
+    instruments: AShareInstrument[];
+  }> {
+    try {
+      const res = await fetch('/api/ashare/sync-latest', {
+        method: options?.codes ? 'POST' : 'GET',
+        headers: { 'Content-Type': 'application/json' },
+        body: options?.codes ? JSON.stringify({ codes: options.codes }) : undefined,
+      });
+
+      if (res.ok) {
+        const data = await res.json();
+        if (data.success && Array.isArray(data.instruments)) {
+          const hydrated = data.instruments.map(hydrateInstrument);
+          localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(hydrated));
+          return { report: data.report, instruments: hydrated };
+        }
+      }
+    } catch (err) {
+      console.warn('[apiClient] server sync failed, attempting direct sync:', err);
+    }
+
+    // 回退到客户端直接直连公共接口同步
+    const current = await this.loadInstruments();
+    const { updatedInstruments, report } = await syncAllInstruments(current);
+    const hydrated = updatedInstruments.map(hydrateInstrument);
+    await this.saveInstruments(hydrated);
+    return { report, instruments: hydrated };
   }
 }
