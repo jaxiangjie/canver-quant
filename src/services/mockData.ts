@@ -304,6 +304,29 @@ export const INITIAL_INSTRUMENTS: AShareInstrument[] = [
     pbPercentile: 25.0,
     bars: generateHistoricalBars(0.620, 0.305, 0.14, 'up', 8),
   },
+  {
+    id: '513520',
+    code: '513520.SH',
+    name: '日经225ETF (QDII)',
+    category: 'qdii_etf',
+    isETF: true,
+    isT0: true, // T+0 回转 (跨境 QDII ETF)
+    stampDutyExempt: true,
+    currentPrice: 2.394, // 后复权价，真实数值由 parquet 覆盖
+    preClose: 2.400,
+    changePct: -0.25,
+    dailyATR: 0.032,
+    annualizedVol: 0.347, // 120日真实年化波动（后复权）
+    riskBudgetWeight: 0.10,
+    currentShares: 0, // 尚未建仓
+    premiumDiscountRate: 0.30, // QDII 常见溢价
+    dividendYield: 1.80,
+    peTTM: 18.5,
+    pb: 1.75,
+    pePercentile: 42.0,
+    pbPercentile: 38.0,
+    bars: generateHistoricalBars(2.394, 0.347, 0.12, 'up', 8),
+  },
 
   // ── poorlab 11 腿池（上一级 pool-lab 定稿生产名单，A股个股）──
   // 价格/波动/bars 均由 parquet 真实日线覆盖（realData.loadRealUniverse），

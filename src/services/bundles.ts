@@ -15,7 +15,7 @@ export const DEFAULT_BUNDLES: InstrumentBundle[] = [
   {
     id: BALANCED9_ID,
     name: '均衡 ETF 9 腿',
-    description: '原默认池：宽基/红利/国债/黄金/纳指/恒科，沿用各自风险预算',
+    description: '宽基/红利/国债/黄金/纳指/日经225（恒生科技已换为日经225，相关性更低、起点更早）',
     items: [
       { id: '510300', riskBudgetWeight: 0.15 },
       { id: '510500', riskBudgetWeight: 0.15 },
@@ -25,7 +25,7 @@ export const DEFAULT_BUNDLES: InstrumentBundle[] = [
       { id: '511010', riskBudgetWeight: 0.15 },
       { id: '518880', riskBudgetWeight: 0.10 },
       { id: '513100', riskBudgetWeight: 0.10 },
-      { id: '513180', riskBudgetWeight: 0.10 },
+      { id: '513520', riskBudgetWeight: 0.10 }, // 日经225，替换 513180 恒生科技（2021-05 起）
     ],
   },
   {
