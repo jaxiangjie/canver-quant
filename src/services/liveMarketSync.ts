@@ -1,4 +1,5 @@
 import { AShareInstrument, AShareBar } from '../types/ashare';
+import { appendValuationSnapshots, enrichUniverseValuation, ETF_INDEX_MAP, ValuationSnapshot } from './valuationStore';
 
 /**
  * 实时/增量 A 股与 ETF 行情同步模块
@@ -19,6 +20,9 @@ export interface SyncDetail {
   annualizedVol: number;
   peTTM?: number;
   pb?: number;
+  valuationSource?: 'direct' | 'index_mapped';
+  warning?: string;
+  snapshotKey?: string;
   error?: string;
 }
 
@@ -30,6 +34,7 @@ export interface SyncReport {
   updatedCount: number;
   alreadyLatestCount: number;
   failedCount: number;
+  valuationSnapshotsAppended?: number;
   details: SyncDetail[];
 }
 
@@ -133,6 +138,43 @@ export async function fetchBatchTencentQuotes(symbols: string[]): Promise<Map<st
     console.warn('[liveMarketSync] fetchBatchTencentQuotes failed:', err);
   }
 
+  return result;
+}
+
+export interface EastmoneyQuote {
+  code: string;
+  price: number;
+  peTTM: number;
+  pb: number;
+}
+
+/**
+ * 东方财富批量快照（第二通道，用于互验；fltt=2 浮点直出）。
+ * 仅个股 PE/PB 字段有效；东财对指数 PE 返回假值（见数据源验证报告），不用于指数。
+ */
+export async function fetchEastmoneyQuotes(codes: string[]): Promise<Map<string, EastmoneyQuote>> {
+  const result = new Map<string, EastmoneyQuote>();
+  if (!codes.length) return result;
+  try {
+    const secids = codes.map((c) => (/^[569]/.test(c) ? `1.${c}` : `0.${c}`)).join(',');
+    const url =
+      'https://push2.eastmoney.com/api/qt/ulist.np/get?fltt=2&invt=2' +
+      `&secids=${secids}&fields=f2,f12,f14,f18,f9,f23,f115`;
+    const res = await fetch(url, {
+      headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' },
+    });
+    const json = await res.json();
+    for (const d of json?.data?.diff || []) {
+      result.set(String(d.f12), {
+        code: String(d.f12),
+        price: Number(d.f2) || 0,
+        peTTM: Number(d.f115) || 0,
+        pb: Number(d.f23) || 0,
+      });
+    }
+  } catch (err) {
+    console.warn('[liveMarketSync] fetchEastmoneyQuotes failed:', err);
+  }
   return result;
 }
 
@@ -265,6 +307,7 @@ export function recomputeIndicators(bars: AShareBar[]): {
 export async function syncSingleInstrument(
   inst: AShareInstrument,
   quoteSnapshot?: RawTencentQuote,
+  ctx?: { emQuote?: EastmoneyQuote; indexQuote?: RawTencentQuote },
 ): Promise<{ instrument: AShareInstrument; detail: SyncDetail }> {
   const symbol = codeToTencentSymbol(inst.code);
   const rawBars = await fetchTencentDailyBars(symbol, 250);
@@ -382,9 +425,56 @@ export async function syncSingleInstrument(
   const changePct = preClose > 0 ? Number((((newPrice - preClose) / preClose) * 100).toFixed(2)) : 0;
   const addedBars = Math.max(0, finalBars.length - prevBars.length);
 
-  // 估值刷新
-  const peTTM = quoteSnapshot?.peTTM ?? inst.peTTM;
-  const pb = quoteSnapshot?.pb ?? inst.pb;
+  // 估值刷新（双通道互验 + 宽基ETF指数映射，规则见 docs/DATA_SOURCE_VALIDATION_2026-10-11.md）
+  let peTTM = quoteSnapshot?.peTTM ?? inst.peTTM ?? 0;
+  let pb = quoteSnapshot?.pb ?? inst.pb ?? 0;
+  let valuationSource: 'direct' | 'index_mapped' | undefined;
+  let warning = '';
+
+  const sixCode = inst.code.split('.')[0];
+  const mappedIndex = ETF_INDEX_MAP[sixCode];
+  const isEtfInst = inst.isETF !== false;
+  const snapshotKey = mappedIndex ?? (isEtfInst ? undefined : sixCode);
+
+  if (ctx?.emQuote) {
+    const txPrice = quoteSnapshot?.currentPrice || 0;
+    const emPrice = ctx.emQuote.price || 0;
+    const priceDiff = txPrice > 0 && emPrice > 0 ? Math.abs(txPrice - emPrice) / txPrice : 0;
+    if (priceDiff > 0.001) {
+      warning += `TX/EM价差${(priceDiff * 100).toFixed(2)}%>0.1%，本轮估值拒写; `;
+      peTTM = inst.peTTM ?? 0;
+      pb = inst.pb ?? 0;
+    } else {
+      if (peTTM > 0 && ctx.emQuote.peTTM > 0) {
+        const d = Math.abs(peTTM - ctx.emQuote.peTTM) / ctx.emQuote.peTTM;
+        if (d > 0.05) {
+          warning += `PE互验差${(d * 100).toFixed(1)}%>5%，拒写; `;
+          peTTM = inst.peTTM ?? 0;
+        } else if (d > 0.01) {
+          warning += `PE互验差${(d * 100).toFixed(1)}%; `;
+        }
+      }
+      if (pb > 0 && ctx.emQuote.pb > 0) {
+        const d = Math.abs(pb - ctx.emQuote.pb) / ctx.emQuote.pb;
+        if (d > 0.05) {
+          warning += `PB互验差${(d * 100).toFixed(1)}%>5%，拒写; `;
+          pb = inst.pb ?? 0;
+        } else if (d > 0.01) {
+          warning += `PB互验差${(d * 100).toFixed(1)}%; `;
+        }
+      }
+      if (peTTM > 0 || pb > 0) valuationSource = 'direct';
+    }
+  } else if (peTTM > 0 || pb > 0) {
+    // 东财通道不可用：单源直写（快照 source=tencent）
+    valuationSource = 'direct';
+  }
+
+  // 宽基 ETF：映射指数 PE（东财指数 PE 为假值，仅腾讯单通道）
+  if (ctx?.indexQuote && mappedIndex && ctx.indexQuote.peTTM && ctx.indexQuote.peTTM > 0) {
+    peTTM = ctx.indexQuote.peTTM;
+    valuationSource = 'index_mapped';
+  }
 
   const updatedInstrument: AShareInstrument = {
     ...inst,
@@ -395,6 +485,7 @@ export async function syncSingleInstrument(
     annualizedVol,
     peTTM,
     pb,
+    valuationSource,
     bars: finalBars,
     syntheticBars: false,
     dataSource: 'realtime_synced',
@@ -416,6 +507,9 @@ export async function syncSingleInstrument(
       annualizedVol,
       peTTM,
       pb,
+      valuationSource,
+      warning: warning || undefined,
+      snapshotKey,
     },
   };
 }
@@ -443,9 +537,18 @@ export async function syncAllInstruments(instruments: AShareInstrument[]): Promi
     };
   }
 
-  // 1. 批量获取实时快照
+  // 1. 批量获取实时快照（含宽基 ETF 映射的指数代码，用于指数 PE）
   const symbols = instruments.map(i => codeToTencentSymbol(i.code));
+  for (const inst of instruments) {
+    const six = inst.code.split('.')[0];
+    const idx = ETF_INDEX_MAP[six];
+    if (idx) symbols.push(`sh${idx}`);
+  }
   const quotesMap = await fetchBatchTencentQuotes(symbols);
+
+  // 1.5 第二通道（东财）互验数据：仅个股（东财指数 PE 为假值）
+  const stockCodes = instruments.filter(i => i.isETF === false).map(i => i.code.split('.')[0]);
+  const emMap = await fetchEastmoneyQuotes(stockCodes);
 
   // 2. 并发同步日线
   const details: SyncDetail[] = [];
@@ -458,7 +561,10 @@ export async function syncAllInstruments(instruments: AShareInstrument[]): Promi
     const promises = batch.map(inst => {
       const sym = codeToTencentSymbol(inst.code);
       const quote = quotesMap.get(sym);
-      return syncSingleInstrument(inst, quote);
+      const six = inst.code.split('.')[0];
+      const idx = ETF_INDEX_MAP[six];
+      const indexQuote = idx ? quotesMap.get(`sh${idx}`) : undefined;
+      return syncSingleInstrument(inst, quote, { emQuote: emMap.get(six), indexQuote });
     });
     const results = await Promise.all(promises);
     for (const r of results) {
@@ -476,6 +582,22 @@ export async function syncAllInstruments(instruments: AShareInstrument[]): Promi
   const alreadyLatestCount = details.filter(d => !d.isUpdated && !d.error).length;
   const failedCount = details.filter(d => !!d.error).length;
 
+  // 3. 估值快照落盘（同 key+date 去重）并用最新历史刷新分位
+  const snapEntries: ValuationSnapshot[] = [];
+  for (const d of details) {
+    if (!d.snapshotKey || !d.newDate) continue;
+    if (!((d.peTTM ?? 0) > 0 || (d.pb ?? 0) > 0)) continue;
+    snapEntries.push({
+      date: d.newDate,
+      key: d.snapshotKey,
+      pe: (d.peTTM ?? 0) > 0 ? d.peTTM : undefined,
+      pb: (d.pb ?? 0) > 0 ? d.pb : undefined,
+      source: d.valuationSource === 'index_mapped' ? 'tencent-index' : 'tencent',
+    });
+  }
+  const appended = appendValuationSnapshots(snapEntries);
+  const enriched = enrichUniverseValuation(updatedInstruments);
+
   const report: SyncReport = {
     success: failedCount === 0 || updatedCount > 0,
     timestamp: new Date().toISOString(),
@@ -484,8 +606,9 @@ export async function syncAllInstruments(instruments: AShareInstrument[]): Promi
     updatedCount,
     alreadyLatestCount,
     failedCount,
+    valuationSnapshotsAppended: appended,
     details,
   };
 
-  return { updatedInstruments, report };
+  return { updatedInstruments: enriched.instruments, report };
 }

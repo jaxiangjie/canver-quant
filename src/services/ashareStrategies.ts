@@ -234,7 +234,12 @@ export function evaluateAShareStrategies(
   const pbPercentile = instrument.pbPercentile ?? 50;
 
   let compositePercentile = 50;
-  const hasValuation = (instrument.category !== 'bond_etf' && instrument.category !== 'commodity_etf') && (peTTM > 0 || pb > 0);
+  const hasValuation =
+    (instrument.category !== 'bond_etf' && instrument.category !== 'commodity_etf') &&
+    (peTTM > 0 || pb > 0) &&
+    // 分位必须来自真实估值历史（快照库/回补）；mock 残留假分位与不足额历史一律不给信号
+    instrument.pePercentile != null &&
+    instrument.pbPercentile != null;
   
   if (hasValuation) {
     compositePercentile = Math.round(pePercentile * 0.55 + pbPercentile * 0.45);
@@ -272,6 +277,9 @@ export function evaluateAShareStrategies(
       positionAdjustmentSuggestion = '估值分位 > 80% 处于极端泡沫区，建议仓位深度折价 -30%~-40% 锁定利润，严格执行移动止损';
       positionMultiplier = 0.65;
     }
+  } else if (peTTM > 0 || pb > 0) {
+    zoneLabel = '估值分位数据不足 · 冷启动观察期';
+    positionAdjustmentSuggestion = '当前 PE/PB 为真实值，但估值历史分位尚未积累足够样本（<250 观测），估值信号暂不启用，维持标准卡弗波动率平价配置';
   } else {
     zoneLabel = '固收/商品类 · 不适用市盈率估值';
     positionAdjustmentSuggestion = '纯债与大宗商品无固定市盈率，按大类资产宏观波动率平价进行配置';

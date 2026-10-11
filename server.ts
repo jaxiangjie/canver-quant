@@ -22,6 +22,7 @@ import {
   mergeStores,
 } from './src/services/persistence';
 import { syncAllInstruments } from './src/services/liveMarketSync';
+import { enrichUniverseValuation } from './src/services/valuationStore';
 
 // In-memory data store for A-Share instruments (real parquet data if available, else mock)
 let instrumentsStore: any[] = [];
@@ -219,6 +220,19 @@ async function initStore() {
           `${persisted.deletedCodes?.length ? `, deleted=${persisted.deletedCodes.length}` : ''})`,
       );
     }
+  }
+
+  // 3. 估值富化：从快照库历史计算 pe/pb 分位（宽基 ETF 映射指数 PE）
+  try {
+    const enr = enrichUniverseValuation(base);
+    base = enr.instruments;
+    if (enr.report.enriched > 0) {
+      console.log(
+        `[valuation] enriched ${enr.report.enriched} instruments with real percentiles (skipped ${enr.report.skipped})`,
+      );
+    }
+  } catch (err: any) {
+    console.warn('[valuation] enrich failed:', err?.message);
   }
 
   instrumentsStore = base;
