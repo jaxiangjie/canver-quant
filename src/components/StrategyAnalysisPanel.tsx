@@ -128,10 +128,10 @@ export const StrategyAnalysisPanel: React.FC<StrategyAnalysisPanelProps> = ({ un
                 <Scale className="w-5 h-5 text-emerald-400" />
                 <div>
                   <h3 className="text-sm font-bold text-white flex items-center gap-2">
-                    滚动市盈率 (PE-TTM) 与市净率 (PB) 估值百分位计算及仓位溢折价建议
+                    估值分位情景模拟（假设输入）· 仓位溢折价联动演示
                   </h3>
                   <p className="text-xs text-slate-400 mt-0.5">
-                    融合卡弗波动率模型与价值安全边际：估值极低时提供仓位溢价支持，估值泡沫时强制折价防守。
+                    融合卡弗波动率模型与价值安全边际：估值极低时提供仓位溢价支持，估值泡沫时强制折价防守。注：本模块为情景模拟器，滑块为假设输入；真实行情无 PE/PB 估值字段，实际模型以波动率定仓与动量为主。
                   </p>
                 </div>
               </div>
@@ -287,7 +287,7 @@ export const StrategyAnalysisPanel: React.FC<StrategyAnalysisPanelProps> = ({ un
               <div className="p-3.5 bg-slate-800/30 rounded border border-slate-800 flex flex-col md:flex-row items-center justify-between gap-4 text-xs">
                 <div className="flex items-center gap-2 text-slate-300">
                   <Sliders className="w-4 h-4 text-slate-400" />
-                  <span>实时微调模拟 PE/PB 分位（观察仓位溢折价联动）：</span>
+                  <span>情景模拟滑块（假设输入，观察仓位溢折价联动）：</span>
                 </div>
 
                 <div className="flex items-center gap-6 font-mono text-[11px]">
@@ -324,7 +324,7 @@ export const StrategyAnalysisPanel: React.FC<StrategyAnalysisPanelProps> = ({ un
                       onClick={() => { setCustomPEPercentile(null); setCustomPBPercentile(null); }}
                       className="px-2 py-0.5 text-[10px] text-slate-400 hover:text-white bg-slate-800 rounded border border-slate-700 transition-colors"
                     >
-                      重置为真实分位
+                      重置为模拟中枢
                     </button>
                   )}
                 </div>

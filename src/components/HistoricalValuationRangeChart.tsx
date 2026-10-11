@@ -102,7 +102,7 @@ export const HistoricalValuationRangeChart: React.FC<HistoricalValuationRangeCha
         textColor: 'text-emerald-400',
         badge: '价格处历史相对低位',
         suggestion: '当前价格位于自身历史（近1/近3年窗口）后 20% 分位，相对自身历史偏便宜，下行安全垫较厚',
-        multiplier: '参考 1.25x',
+        reference: '相对自身历史便宜',
       };
     } else if (pct <= 80) {
       return {
@@ -114,7 +114,7 @@ export const HistoricalValuationRangeChart: React.FC<HistoricalValuationRangeCha
         textColor: 'text-sky-400',
         badge: '价格中位常态区间',
         suggestion: '当前价格处于自身历史中位区间，遵循卡弗系统化波动率平价与动量常规预算',
-        multiplier: '参考 1.00x',
+        reference: '处于历史中位',
       };
     } else {
       return {
@@ -126,7 +126,7 @@ export const HistoricalValuationRangeChart: React.FC<HistoricalValuationRangeCha
         textColor: 'text-rose-400',
         badge: '价格处历史相对高位',
         suggestion: '当前价格位于自身历史前 20% 分位，相对自身历史偏贵，注意回撤风险',
-        multiplier: '参考 0.65x',
+        reference: '相对自身历史偏贵',
       };
     }
   };
@@ -701,7 +701,7 @@ export const HistoricalValuationRangeChart: React.FC<HistoricalValuationRangeCha
 
               <div className="text-[11px] text-slate-300 bg-slate-950/60 p-2 rounded border border-slate-800/80 leading-relaxed flex items-center justify-between">
                 <span>{peZone.suggestion}</span>
-                <span className="font-mono font-bold text-cyan-300 shrink-0 ml-2">{peZone.multiplier}</span>
+                <span className="font-mono font-bold text-cyan-300 shrink-0 ml-2">{peZone.reference}</span>
               </div>
             </div>
 
@@ -764,7 +764,7 @@ export const HistoricalValuationRangeChart: React.FC<HistoricalValuationRangeCha
 
               <div className="text-[11px] text-slate-300 bg-slate-950/60 p-2 rounded border border-slate-800/80 leading-relaxed flex items-center justify-between">
                 <span>{pbZone.suggestion}</span>
-                <span className="font-mono font-bold text-purple-300 shrink-0 ml-2">{pbZone.multiplier}</span>
+                <span className="font-mono font-bold text-purple-300 shrink-0 ml-2">{pbZone.reference}</span>
               </div>
             </div>
           </div>
@@ -865,7 +865,7 @@ export const HistoricalValuationRangeChart: React.FC<HistoricalValuationRangeCha
           <span className="text-slate-400 text-[11px]">价格分位联动参考</span>
           <div className="mt-1">
             <span className={`text-sm font-bold ${peZone.textColor}`}>
-              {peZone.multiplier}
+              {peZone.reference}
             </span>
             <span className="text-[10px] text-slate-400 block">{peZone.badge}</span>
           </div>
