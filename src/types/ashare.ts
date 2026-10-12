@@ -51,8 +51,48 @@ export interface AShareInstrument {
   pePercentile?: number;        // PE历史百分位 (0 - 100%)
   pbPercentile?: number;        // PB历史百分位 (0 - 100%)
   valuationSource?: 'direct' | 'index_mapped'; // 估值来源：direct=自身PE/PB(东财互验)；index_mapped=映射指数PE(腾讯单通道)
+  // 基本面扩展字段（解耦设计：由 fundamentalService 注入）
+  roe?: number;                 // 最新扣非/净资产收益率 (%)
+  netProfitGrowthYoy?: number;  // 归母净利润同比增速 (%)
+  revenueGrowthYoy?: number;    // 营业总收入同比增速 (%)
+  grossMargin?: number;         // 销售毛利率 (%)
+  debtRatio?: number;           // 资产负债率 (%)
+  eps?: number;                 // 每股收益 (元)
+  bps?: number;                 // 每股净资产 (元)
+  latestReportPeriod?: string;  // 最新财报期 (例如 "2026中报", "2025年报")
+  historicalFundamentals?: FinancialReportPoint[]; // 近多期财报历史趋势 (季频/年频)
+  fundamentalQualityScore?: number; // 基本面综合质量分 (0 - 100)
+  valueTrapRisk?: 'LOW' | 'MEDIUM' | 'HIGH'; // 价值陷阱风险等级
   historicalValuation?: HistoricalValuationPoint[]; // 历史估值分位序列 (含PE/PB分位及数值)
   bars: AShareBar[];    // 历史日线
+}
+
+export interface FinancialReportPoint {
+  period: string;               // 报告期，如 "2026中报", "2026一季报", "2025年报"
+  date: string;                 // 报告发布/截止日期 YYYY-MM-DD
+  roe?: number;                 // 扣非ROE / ROE(加权) (%)
+  netProfitGrowthYoy?: number;  // 归母净利润同比 (%)
+  revenueGrowthYoy?: number;    // 营业收入同比 (%)
+  grossMargin?: number;         // 销售毛利率 (%)
+  debtRatio?: number;           // 资产负债率 (%)
+}
+
+export interface FundamentalProfile {
+  code: string;
+  name: string;
+  dividendYield?: number;
+  roe?: number;
+  netProfitGrowthYoy?: number;
+  revenueGrowthYoy?: number;
+  grossMargin?: number;
+  debtRatio?: number;
+  eps?: number;
+  bps?: number;
+  latestReportPeriod?: string;
+  reports?: FinancialReportPoint[];
+  qualityScore: number;         // 质量评分 0 - 100
+  valueTrapRisk: 'LOW' | 'MEDIUM' | 'HIGH';
+  diagnosticSummary: string;    // 诊断结论简述
 }
 
 export interface HistoricalValuationPoint {
@@ -234,6 +274,18 @@ export interface InstrumentAnalyticsItem {
   quadrantLabel: string;
   quadrantColor: string;
   quadrantAdvice: string;
+  
+  // 基本面质量与价值陷阱诊断
+  roe?: number;
+  netProfitGrowthYoy?: number;
+  revenueGrowthYoy?: number;
+  grossMargin?: number;
+  debtRatio?: number;
+  latestReportPeriod?: string;
+  fundamentalQualityScore: number; // 基本面质量综合分 (0 - 100)
+  valueTrapRisk: 'LOW' | 'MEDIUM' | 'HIGH';
+  valueTrapWarning?: string;      // 针对价值陷阱的具体警示信息
+  historicalFundamentals?: FinancialReportPoint[];
   
   // 仓位对比与缓冲带判定
   currentShares: number;

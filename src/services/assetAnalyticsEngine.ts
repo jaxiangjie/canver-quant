@@ -6,6 +6,7 @@ import {
   ValueMomentumQuadrant 
 } from '../types/ashare';
 import { evaluateAShareStrategies } from './ashareStrategies';
+import { getFundamentalProfile } from './fundamentalService';
 
 /**
  * 10-Year China Government Bond Yield (Risk-Free Benchmark for Fed Model ERP)
@@ -25,12 +26,13 @@ export function computeInstrumentAnalytics(
   settings: CarverSettings,
   universe: AShareInstrument[]
 ): InstrumentAnalyticsItem {
+  const profile = getFundamentalProfile(instrument);
   const isCommodityOrBond = instrument.category === 'bond_etf' || instrument.category === 'commodity_etf';
   const peTTM = instrument.peTTM ?? 0;
   const pb = instrument.pb ?? 0;
   const pePercentile = instrument.pePercentile ?? 50;
   const pbPercentile = instrument.pbPercentile ?? 50;
-  const dividendYield = instrument.dividendYield ?? 0;
+  const dividendYield = instrument.dividendYield || profile.dividendYield || 0;
 
   // 1. 估值综合百分位
   const compositeValuationPercentile = isCommodityOrBond 
@@ -167,10 +169,20 @@ export function computeInstrumentAnalytics(
     targetShares,
     targetValue,
     targetWeight,
-    withinBuffer,
     action,
     recommendedShares,
-    reasonForDifference
+    reasonForDifference,
+    // 基本面深度健康度与价值陷阱诊断
+    roe: profile.roe,
+    netProfitGrowthYoy: profile.netProfitGrowthYoy,
+    revenueGrowthYoy: profile.revenueGrowthYoy,
+    grossMargin: profile.grossMargin,
+    debtRatio: profile.debtRatio,
+    latestReportPeriod: profile.latestReportPeriod,
+    fundamentalQualityScore: profile.qualityScore,
+    valueTrapRisk: profile.valueTrapRisk,
+    valueTrapWarning: profile.diagnosticSummary,
+    historicalFundamentals: profile.reports,
   };
 }
 

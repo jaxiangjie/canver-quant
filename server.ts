@@ -249,6 +249,15 @@ async function initStore() {
     console.warn('[valuation] enrich failed:', err?.message);
   }
 
+  // 4. 基本面与财务质量富化：注入 ROE、净利润同比、营收同比、股息率与价值陷阱评分
+  try {
+    const { enrichUniverseFundamentals } = await import('./src/services/fundamentalService');
+    base = enrichUniverseFundamentals(base);
+    console.log(`[fundamentals] enriched ${base.length} instruments with fundamental health metrics`);
+  } catch (err: any) {
+    console.warn('[fundamentals] enrich failed:', err?.message);
+  }
+
   instrumentsStore = base;
 }
 

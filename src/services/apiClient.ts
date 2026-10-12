@@ -64,6 +64,18 @@ historicalValuation: Array.isArray(raw?.historicalValuation) && raw.historicalVa
     bars,
     syntheticBars: !hasRealBars,
     dataSource: raw?.dataSource ?? (hasRealBars ? 'parquet' : 'manual'),
+    // 基本面健康度扩展字段透传
+    roe: raw?.roe,
+    netProfitGrowthYoy: raw?.netProfitGrowthYoy,
+    revenueGrowthYoy: raw?.revenueGrowthYoy,
+    grossMargin: raw?.grossMargin,
+    debtRatio: raw?.debtRatio,
+    eps: raw?.eps,
+    bps: raw?.bps,
+    latestReportPeriod: raw?.latestReportPeriod,
+    historicalFundamentals: raw?.historicalFundamentals,
+    fundamentalQualityScore: raw?.fundamentalQualityScore,
+    valueTrapRisk: raw?.valueTrapRisk,
   };
 }
 

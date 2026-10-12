@@ -13,6 +13,7 @@ import { ValueMomentumScatterMatrix } from './ValueMomentumScatterMatrix';
 import { InstrumentPriceTrendChart } from './InstrumentPriceTrendChart';
 import { ValuationHistoryChart } from './ValuationHistoryChart';
 import { HistoricalValuationRangeChart } from './HistoricalValuationRangeChart';
+import { FundamentalHealthCard } from './FundamentalHealthCard';
 import { 
   Radar, 
   Compass, 
@@ -296,6 +297,8 @@ export const InstrumentDeepAnalysisPanel: React.FC<InstrumentDeepAnalysisPanelPr
                     <th className="py-2.5 px-2">资产类别</th>
                     <th className="py-2.5 px-2 text-right">当前市价</th>
                     <th className="py-2.5 px-2 text-right">PE (分位)</th>
+                    <th className="py-2.5 px-2 text-right">ROE / 质量</th>
+                    <th className="py-2.5 px-2 text-center">陷阱体检</th>
                     <th className="py-2.5 px-2 text-right">股债溢价 ERP</th>
                     <th className="py-2.5 px-2 text-right">股息率</th>
                     <th className="py-2.5 px-2 text-right">年化波动 (分位)</th>
@@ -366,6 +369,42 @@ export const InstrumentDeepAnalysisPanel: React.FC<InstrumentDeepAnalysisPanelPr
                                 <span className="text-[10px] text-slate-400">无估值数据</span>
                               )}
                             </div>
+                          )}
+                        </td>
+
+                        {/* ROE 与基本面质量 */}
+                        <td className="py-2.5 px-2 text-right font-mono">
+                          {isBondOrCommodity ? (
+                            <span className="text-slate-500">--</span>
+                          ) : (
+                            <div className="flex flex-col items-end">
+                              <span className={`font-semibold ${
+                                (item.roe ?? 0) >= 10 ? 'text-emerald-400' :
+                                (item.roe ?? 0) > 0 ? 'text-slate-200' :
+                                'text-rose-400'
+                              }`}>
+                                {item.roe != null ? `${item.roe.toFixed(1)}%` : '--'}
+                              </span>
+                              <span className="text-[10px] text-slate-400 font-sans">
+                                评分 {item.fundamentalQualityScore}
+                              </span>
+                            </div>
+                          )}
+                        </td>
+
+                        {/* 价值陷阱诊断 */}
+                        <td className="py-2.5 px-2 text-center">
+                          {isBondOrCommodity ? (
+                            <span className="text-[10px] text-slate-500">宏观</span>
+                          ) : (
+                            <span className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${
+                              item.valueTrapRisk === 'HIGH' ? 'bg-rose-950 text-rose-300 border border-rose-800' :
+                              item.valueTrapRisk === 'MEDIUM' ? 'bg-amber-950 text-amber-300 border border-amber-800' :
+                              'bg-emerald-950 text-emerald-300 border border-emerald-800'
+                            }`}>
+                              {item.valueTrapRisk === 'HIGH' ? '高危陷阱' :
+                               item.valueTrapRisk === 'MEDIUM' ? '失速关注' : '健康良好'}
+                            </span>
                           )}
                         </td>
 
@@ -643,6 +682,9 @@ export const InstrumentDeepAnalysisPanel: React.FC<InstrumentDeepAnalysisPanelPr
               </div>
             </div>
           </div>
+
+          {/* 基本面深度诊断与价值陷阱体检卡片 */}
+          <FundamentalHealthCard item={selectedItem} />
 
           {/* 历史价格分位区间图谱（基于真实后复权收盘价，由 parquet bars 派生，非合成 PE/PB 估值） */}
           <HistoricalValuationRangeChart
