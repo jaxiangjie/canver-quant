@@ -13,6 +13,7 @@
 | [**3. 参考文献与对标 (REFERENCES.md)**](./REFERENCES.md) | 经典书籍清单、顶刊学术文献、同级工业级产品横向对比（Portfolio Visualizer 等） | 理论研究者、产品经理 |
 | [**4. A 股本地化交易机制 (A_SHARE_LOCALIZATION.md)**](./A_SHARE_LOCALIZATION.md) | T+1 规则、涨跌停保护、一手 100 股向下取整、ETF 免印花税、股债收益差 ERP | A 股实盘交易者、风控员 |
 | [**5. 压力测试与蒙特卡洛 (STRESS_TEST_AND_MONTE_CARLO.md)**](./STRESS_TEST_AND_MONTE_CARLO.md) | 2015 股灾/2018 熊市/2024 流动性挤压历史场景测试、GBM 几何布朗运动财富概率锥推导 | 风控专家、长期配置投资者 |
+| [**6. 基本面策略优化评审 (FUNDAMENTAL_STRATEGY_REVIEW.md)**](./FUNDAMENTAL_STRATEGY_REVIEW.md) | 专著考据(Carver/Asness/Piotroski)、价值陷阱根因剖析、双重门槛滤网、工业级产品对标 | 策略架构师、基本面量化研究员 |
 
 ---
 

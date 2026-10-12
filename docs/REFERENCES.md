@@ -37,6 +37,15 @@
 4. **Chow, G., Jacquier, E., Kritzman, M., & Lowry, K. (1999)**:
    * *Optimal Portfolios in Good Times and Bad*, *Financial Analysts Journal*, 55(3), 65-73.
    * **文献核心**：市场在危机时相关性急剧攀升（Turbulence Index），必须在回测与压力测试中检验非线性相关性击穿。
+5. **Asness, C. S., Moskowitz, T. J., & Pedersen, L. H. (2013)**:
+   * *Value and momentum everywhere*, *The Journal of Finance*, 68(3), 929-985.
+   * **文献核心**：价值因子与动量因子跨国界、跨资产类别具备稳健的负相关性（约 -0.5）。将价值与动量等权融合，能平滑动量崩溃与价值阴跌，使夏普比率接近翻倍。
+6. **Piotroski, J. D. (2000)**:
+   * *Value Investing: The Use of Historical Financial Statement Information to Separate Winners from Losers*, *Journal of Accounting Research*, 38, 1-41.
+   * **文献核心**：低估值池中大量存在基本面坍塌的“价值陷阱”。引入 ROA、经营现金流、杠杆率变动与毛利率等财务基本面 F-Score 9 分制滤网，能剔除 50% 的垃圾资产，将年化超额收益提升 7.5% 以上。
+7. **Asness, C. S., Frazzini, A., & Pedersen, L. H. (2019)**:
+   * *Quality Minus Junk*, *Review of Accounting Studies*, 24(1), 34-112.
+   * **文献核心**：高质量资产（高盈利能力、高成长性、高安全边际）具备极高风险调整后收益；高估值但优质的资产远胜于低估值但劣质的垃圾资产。
 
 ---
 

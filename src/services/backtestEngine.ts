@@ -79,6 +79,12 @@ function buildSnapshot(inst: AShareInstrument, prefix: AShareInstrument['bars'])
     pePercentile: undefined,
     pbPercentile: undefined,
     premiumDiscountRate: undefined,
+    // 透传真实基本面质量属性
+    roe: inst.roe,
+    netProfitGrowthYoy: inst.netProfitGrowthYoy,
+    revenueGrowthYoy: inst.revenueGrowthYoy,
+    fundamentalQualityScore: inst.fundamentalQualityScore,
+    valueTrapRisk: inst.valueTrapRisk,
   };
 }
 

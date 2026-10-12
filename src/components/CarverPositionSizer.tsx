@@ -365,33 +365,87 @@ export const CarverPositionSizer: React.FC<CarverPositionSizerProps> = ({
             </p>
           </div>
 
+          {/* A股 ERP 股债收益差逆向战术偏置与基本面双门槛防护 */}
           <div 
-            onClick={() => onUpdateSettings({ ...settings, useERPTilt: settings.useERPTilt === false ? true : false })}
-            className={`flex items-start gap-3 p-3 rounded-lg border cursor-pointer transition-all ${
+            className={`flex flex-col gap-2.5 p-3.5 rounded-lg border transition-all ${
               settings.useERPTilt !== false 
                 ? 'bg-emerald-950/40 border-emerald-700/60 text-emerald-200' 
-                : 'bg-slate-950/40 border-slate-800 text-slate-400 hover:border-slate-700'
+                : 'bg-slate-950/40 border-slate-800 text-slate-400'
             }`}
           >
-            <div className={`p-1.5 rounded mt-0.5 ${settings.useERPTilt !== false ? 'bg-emerald-900/60 text-emerald-400' : 'bg-slate-800 text-slate-500'}`}>
-              <Zap className="w-4 h-4" />
-            </div>
-            <div className="flex-1">
-              <div className="flex items-center justify-between text-xs font-semibold">
-                <span className="text-white flex items-center gap-1.5">
-                  <span>A股股债收益差 (ERP/Fed模型) 逆向战术偏置</span>
-                  <span className="text-[10px] font-mono px-1.5 py-0.2 rounded bg-emerald-900 text-emerald-200">
-                    安全边际增益
-                  </span>
-                </span>
-                <span className="font-mono text-xs">
-                  {settings.useERPTilt !== false ? '已开启 (需 PE/PB 估值数据)' : '未开启 (纯动量)'}
-                </span>
+            <div className="flex items-start justify-between gap-2">
+              <div className="flex items-center gap-2">
+                <div className={`p-1.5 rounded ${settings.useERPTilt !== false ? 'bg-emerald-900/60 text-emerald-400' : 'bg-slate-800 text-slate-500'}`}>
+                  <Zap className="w-4 h-4" />
+                </div>
+                <div>
+                  <div className="flex items-center gap-1.5">
+                    <span className="font-bold text-white text-xs">A股股债收益差 (ERP/Fed) 战术偏置</span>
+                    <span className="text-[10px] font-mono px-1.5 py-0.2 rounded bg-emerald-900 text-emerald-200">
+                      安全边际增益
+                    </span>
+                  </div>
+                </div>
               </div>
-              <p className="text-[11px] text-slate-400 mt-1 leading-relaxed">
-                跟踪全市场 PE 倒数与 10 年期国债收益率差额。当大盘估值处于历史 80%+ 极度低估黄金坑时，为权益资产注入 1.15x~1.25x 逆向进攻偏置，右侧反弹时享受超额阿尔法。⚠️ 当前真实行情仅含 OHLCV 价格、无 PE/PB 估值字段，估值分位恒为中位，该偏置在真实数据下不会触发（接入基本面数据后生效）。
-              </p>
+
+              {/* 开关切换 */}
+              <button
+                type="button"
+                onClick={() => onUpdateSettings({ ...settings, useERPTilt: settings.useERPTilt === false ? true : false })}
+                className={`text-[11px] font-semibold px-2 py-0.5 rounded border transition-colors ${
+                  settings.useERPTilt !== false 
+                    ? 'bg-emerald-600 text-white border-emerald-500' 
+                    : 'bg-slate-800 text-slate-400 border-slate-700 hover:text-white'
+                }`}
+              >
+                {settings.useERPTilt !== false ? '已启用偏置' : '已停用 (纯动量)'}
+              </button>
             </div>
+
+            <p className="text-[11px] text-slate-400 leading-relaxed">
+              跟踪标的 PE 倒数与 10 年期国债收益率利差。当标的估值处于历史低估黄金坑时，注入 +1.5~+3.0 逆向进攻标量偏置。
+            </p>
+
+            {/* 基本面双门槛守门人配置 (根据文献评审与 Piotroski/Asness 建议设计) */}
+            {settings.useERPTilt !== false && (
+              <div className="flex flex-col gap-2 pt-2 border-t border-emerald-900/40 text-[11px]">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-1.5">
+                    <span className="text-white font-medium">🛡️ 质量门槛 (Piotroski Gate):</span>
+                    <span className="text-slate-400 text-[10px]">排除高危价值陷阱/亏损标的</span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => onUpdateSettings({ ...settings, useQualityGate: settings.useQualityGate === false ? true : false })}
+                    className={`px-2 py-0.5 rounded font-mono text-[10px] border transition-colors ${
+                      settings.useQualityGate !== false
+                        ? 'bg-emerald-900 text-emerald-200 border-emerald-700 font-bold'
+                        : 'bg-slate-800 text-slate-400 border-slate-700'
+                    }`}
+                  >
+                    {settings.useQualityGate !== false ? '已拦截陷阱 (推荐)' : '不设防'}
+                  </button>
+                </div>
+
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-1.5">
+                    <span className="text-white font-medium">📈 趋势门槛 (Asness Trend Gate):</span>
+                    <span className="text-slate-400 text-[10px]">站上年线或动量非负才加仓</span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => onUpdateSettings({ ...settings, useTrendGate: settings.useTrendGate === true ? false : true })}
+                    className={`px-2 py-0.5 rounded font-mono text-[10px] border transition-colors ${
+                      settings.useTrendGate === true
+                        ? 'bg-emerald-900 text-emerald-200 border-emerald-700 font-bold'
+                        : 'bg-slate-800 text-slate-400 border-slate-700'
+                    }`}
+                  >
+                    {settings.useTrendGate === true ? '右侧确认 (已激活)' : '允许左侧抄底'}
+                  </button>
+                </div>
+              </div>
+            )}
           </div>
         </div>
 

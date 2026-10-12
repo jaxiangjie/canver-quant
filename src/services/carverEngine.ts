@@ -143,10 +143,20 @@ export function calculateInstrumentPosition(
 
   // A股股债收益差 (ERP/Fed模型) 逆向战术安全边际增益 (Tactical Tilt)
   if (settings.useERPTilt !== false && (instrument.category === 'broad_etf' || instrument.category === 'stock_cn' || instrument.category === 'sector_etf')) {
-    if (strategySignals.valuationSignal.valuationZone === 'EXTREME_LOW') {
-      scalar = Math.min(20, scalar + 3.0); // 极度低估黄金坑，逆向进攻偏置
-    } else if (strategySignals.valuationSignal.valuationZone === 'UNDERVALUED') {
-      scalar = Math.min(20, scalar + 1.5);
+    // 门槛 1: 质量过滤 (Quality Gate / Piotroski 防御)
+    // 若开启 useQualityGate，且标的被判定为高危价值陷阱（或亏损/业绩腰斩），绝对禁止加仓偏置
+    const isQualityPassed = settings.useQualityGate !== true || instrument.valueTrapRisk !== 'HIGH';
+
+    // 门槛 2: 动量趋势过滤 (Trend Gate / Asness 右侧确认)
+    // 若开启 useTrendGate，要求标的未破位年线 (aboveMA250) 或 短期动量已转正，避免左侧接飞刀
+    const isTrendPassed = settings.useTrendGate !== true || strategySignals.absoluteMomentumPass || strategySignals.finalForecastScalar >= 0;
+
+    if (isQualityPassed && isTrendPassed) {
+      if (strategySignals.valuationSignal.valuationZone === 'EXTREME_LOW') {
+        scalar = Math.min(20, scalar + 3.0); // 极度低估黄金坑，逆向进攻偏置
+      } else if (strategySignals.valuationSignal.valuationZone === 'UNDERVALUED') {
+        scalar = Math.min(20, scalar + 1.5);
+      }
     }
   }
 
