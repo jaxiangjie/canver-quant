@@ -1,72 +1,6 @@
 import { AShareInstrument, StrategySignals, ValuationPercentileSignal, HistoricalValuationPoint } from '../types/ashare';
 
 /**
- * Generate 5-year quarterly historical PE/PB valuation percentile trajectory
- */
-export function generate5YearValuationHistory(instrument: AShareInstrument): HistoricalValuationPoint[] {
-  if (!instrument) return [];
-  const isCommodityOrBond = instrument.category === 'bond_etf' || instrument.category === 'commodity_etf';
-  const quarters = [
-    '2021-Q1', '2021-Q2', '2021-Q3', '2021-Q4',
-    '2022-Q1', '2022-Q2', '2022-Q3', '2022-Q4',
-    '2023-Q1', '2023-Q2', '2023-Q3', '2023-Q4',
-    '2024-Q1', '2024-Q2', '2024-Q3', '2024-Q4',
-    '2025-Q1', '2025-Q2', '2025-Q3', '2025-Q4',
-    '2026-Q1'
-  ];
-
-  const currentPE = instrument.peTTM || 15;
-  const currentPB = instrument.pb || 1.5;
-  const currentPEPct = instrument.pePercentile ?? 50;
-  const currentPBPct = instrument.pbPercentile ?? 50;
-
-  // Macro 5-year cycle trajectory in A-shares (2021 peak -> 2022-2023 compression -> 2024 Q1 trough -> rebound)
-  const macroCycle = [
-    88, 84, 76, 68,
-    62, 54, 46, 38,
-    42, 35, 26, 18,
-    12, 22, 30, 45,
-    38, 42, 34, 28,
-    currentPEPct
-  ];
-
-  return quarters.map((q, idx) => {
-    if (isCommodityOrBond) {
-      return {
-        date: q,
-        pe: 0,
-        pb: 0,
-        pePercentile: 50,
-        pbPercentile: 50,
-        compositePercentile: 50,
-      };
-    }
-
-    const baseCycleVal = macroCycle[idx];
-    const pePct = Math.round(Math.max(5, Math.min(95, baseCycleVal * (currentPEPct / 50))));
-    const pbPct = Math.round(Math.max(5, Math.min(95, (baseCycleVal - 4) * (currentPBPct / 50))));
-    
-    // Exact match for the last point (current)
-    const finalPEPct = idx === quarters.length - 1 ? currentPEPct : pePct;
-    const finalPBPct = idx === quarters.length - 1 ? currentPBPct : pbPct;
-    const compPct = Math.round(finalPEPct * 0.55 + finalPBPct * 0.45);
-
-    // Approximate historical PE/PB values matching the percentile
-    const peVal = Number((currentPE * (0.6 + (finalPEPct / 100) * 0.8)).toFixed(1));
-    const pbVal = Number((currentPB * (0.6 + (finalPBPct / 100) * 0.8)).toFixed(2));
-
-    return {
-      date: q,
-      pe: idx === quarters.length - 1 ? currentPE : peVal,
-      pb: idx === quarters.length - 1 ? currentPB : pbVal,
-      pePercentile: finalPEPct,
-      pbPercentile: finalPBPct,
-      compositePercentile: compPct,
-    };
-  });
-}
-
-/**
  * Generate 3-year quarterly historical PE/PB valuation percentile trajectory (12 quarters)
  * Covering 2023-Q2 to 2026-Q1 (recent 3-year market cycle: from 2023 valuation adjustment,
  * 2024-Q1 historical bottom, 2024-Q4 policy rebound, to 2026 current level).
@@ -126,6 +60,58 @@ export function generate3YearValuationHistory(instrument: Partial<AShareInstrume
       pePercentile: finalPEPct,
       pbPercentile: finalPBPct,
       compositePercentile: compPct,
+    };
+  });
+}
+
+/**
+ * 基于真实后复权收盘价的历史「价格分位」轨迹 —— 替代原合成 PE/PB 估值分位。
+ *
+ * 数据诚信：本函数不引入任何虚构的"宏观周期"，全部由 instrument.bars（真实 parquet 行情）派生。
+ * - 仅当 bars 为真实行情（样本 >= 60 根）时返回数据；缺失 / 过短返回 []，由调用方呈现"无真实数据"空态。
+ * - 取最近 3 年（约 750 交易日）范围内的季末样本点；每个样本点的分位 = 其收盘价在各自回看窗口内的百分位：
+ *     pePercentile  → 近 1 年（250 日）窗口分位（短期相对位置）
+ *     pbPercentile  → 近 3 年（750 日，或全样本）窗口分位（长期相对位置）
+ *   双轨分别刻画"短期 vs 长期"相对位置，均为真实价格派生，无合成假设。
+ */
+export function generatePricePercentileHistory(instrument: Partial<AShareInstrument>): HistoricalValuationPoint[] {
+  const bars = instrument?.bars;
+  if (!Array.isArray(bars) || bars.length < 60) return [];
+
+  const sorted = [...bars].sort(
+    (a, b) => new Date(a.tradeDate).getTime() - new Date(b.tradeDate).getTime()
+  );
+  const closes = sorted.map((b) => b.close);
+  const dates = sorted.map((b) => b.tradeDate);
+
+  // 取最近 3 年（750 交易日）范围内的季末样本（约每 63 日一季）
+  const startIdx = Math.max(0, sorted.length - 750);
+  const sampleSet = Array.from(
+    new Set(
+      Array.from({ length: sorted.length - startIdx }, (_, k) => startIdx + k).filter(
+        (i) => i === sorted.length - 1 || (i - startIdx) % 63 === 0
+      )
+    )
+  );
+
+  const pctOf = (value: number, lo: number, hi: number): number => {
+    if (hi <= lo) return 50;
+    return Math.max(1, Math.min(99, Math.round(((value - lo) / (hi - lo)) * 100)));
+  };
+
+  return sampleSet.map((i) => {
+    const close = closes[i];
+    const win1 = closes.slice(Math.max(0, i - 250), i + 1);
+    const pePct = pctOf(close, Math.min(...win1), Math.max(...win1));
+    const win3 = closes.slice(Math.max(0, i - 750), i + 1);
+    const pbPct = pctOf(close, Math.min(...win3), Math.max(...win3));
+    return {
+      date: dates[i],
+      pe: close, // 复用 pe/pb 字段承载真实收盘价
+      pb: close,
+      pePercentile: pePct,
+      pbPercentile: pbPct,
+      compositePercentile: Math.round((pePct + pbPct) / 2),
     };
   });
 }
@@ -248,7 +234,12 @@ export function evaluateAShareStrategies(
   const pbPercentile = instrument.pbPercentile ?? 50;
 
   let compositePercentile = 50;
-  const hasValuation = (instrument.category !== 'bond_etf' && instrument.category !== 'commodity_etf') && (peTTM > 0 || pb > 0);
+  const hasValuation =
+    (instrument.category !== 'bond_etf' && instrument.category !== 'commodity_etf') &&
+    (peTTM > 0 || pb > 0) &&
+    // 分位必须来自真实估值历史（快照库/回补）；mock 残留假分位与不足额历史一律不给信号
+    instrument.pePercentile != null &&
+    instrument.pbPercentile != null;
   
   if (hasValuation) {
     compositePercentile = Math.round(pePercentile * 0.55 + pbPercentile * 0.45);
@@ -286,12 +277,15 @@ export function evaluateAShareStrategies(
       positionAdjustmentSuggestion = '估值分位 > 80% 处于极端泡沫区，建议仓位深度折价 -30%~-40% 锁定利润，严格执行移动止损';
       positionMultiplier = 0.65;
     }
+  } else if (peTTM > 0 || pb > 0) {
+    zoneLabel = '估值分位数据不足 · 冷启动观察期';
+    positionAdjustmentSuggestion = '当前 PE/PB 为真实值，但估值历史分位尚未积累足够样本（<250 观测），估值信号暂不启用，维持标准卡弗波动率平价配置';
   } else {
     zoneLabel = '固收/商品类 · 不适用市盈率估值';
     positionAdjustmentSuggestion = '纯债与大宗商品无固定市盈率，按大类资产宏观波动率平价进行配置';
   }
 
-  const history5y = generate5YearValuationHistory(instrument);
+  const history5y = generatePricePercentileHistory(instrument);
 
   const valuationSignal: ValuationPercentileSignal = {
     peTTM,

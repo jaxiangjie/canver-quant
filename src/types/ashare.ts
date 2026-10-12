@@ -50,6 +50,7 @@ export interface AShareInstrument {
   pb?: number;                  // 市净率 (PB)
   pePercentile?: number;        // PE历史百分位 (0 - 100%)
   pbPercentile?: number;        // PB历史百分位 (0 - 100%)
+  valuationSource?: 'direct' | 'index_mapped'; // 估值来源：direct=自身PE/PB(东财互验)；index_mapped=映射指数PE(腾讯单通道)
   historicalValuation?: HistoricalValuationPoint[]; // 历史估值分位序列 (含PE/PB分位及数值)
   bars: AShareBar[];    // 历史日线
 }

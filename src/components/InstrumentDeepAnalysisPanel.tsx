@@ -8,7 +8,7 @@ import {
   computeUniverseAnalytics, 
   CHINA_10Y_BOND_YIELD 
 } from '../services/assetAnalyticsEngine';
-import { generate5YearValuationHistory } from '../services/ashareStrategies';
+import { generatePricePercentileHistory } from '../services/ashareStrategies';
 import { ValueMomentumScatterMatrix } from './ValueMomentumScatterMatrix';
 import { InstrumentPriceTrendChart } from './InstrumentPriceTrendChart';
 import { ValuationHistoryChart } from './ValuationHistoryChart';
@@ -69,7 +69,7 @@ export const InstrumentDeepAnalysisPanel: React.FC<InstrumentDeepAnalysisPanelPr
   // Selected Instrument 5-Year Valuation History
   const valuationHistory5Y = useMemo(() => {
     if (!selectedItem?.instrument) return [];
-    return generate5YearValuationHistory(selectedItem.instrument);
+    return generatePricePercentileHistory(selectedItem.instrument);
   }, [selectedItem]);
 
   // Simulated Metrics for Selected Instrument
@@ -355,12 +355,16 @@ export const InstrumentDeepAnalysisPanel: React.FC<InstrumentDeepAnalysisPanelPr
                           ) : (
                             <div className="flex flex-col items-end">
                               <span className="text-slate-200">{item.peTTM > 0 ? item.peTTM.toFixed(1) : '--'}</span>
-                              <span className={`text-[10px] font-semibold ${
-                                item.pePercentile < 30 ? 'text-emerald-400' :
-                                item.pePercentile > 70 ? 'text-rose-400' : 'text-slate-400'
-                              }`}>
-                                {item.pePercentile}% 分位
-                              </span>
+                              {item.peTTM > 0 ? (
+                                <span className={`text-[10px] font-semibold ${
+                                  item.pePercentile < 30 ? 'text-emerald-400' :
+                                  item.pePercentile > 70 ? 'text-rose-400' : 'text-slate-400'
+                                }`}>
+                                  {item.pePercentile}% 分位
+                                </span>
+                              ) : (
+                                <span className="text-[10px] text-slate-400">无估值数据</span>
+                              )}
                             </div>
                           )}
                         </td>
@@ -552,11 +556,11 @@ export const InstrumentDeepAnalysisPanel: React.FC<InstrumentDeepAnalysisPanelPr
               <div className="space-y-1.5 text-xs font-mono pt-3 border-t border-slate-800">
                 <div className="flex justify-between">
                   <span className="text-slate-400">PE-TTM:</span>
-                  <span className="text-slate-200">{selectedItem.peTTM > 0 ? selectedItem.peTTM.toFixed(1) : '--'} ({selectedItem.pePercentile}% 分位)</span>
+                  <span className="text-slate-200">{selectedItem.peTTM > 0 ? `${selectedItem.peTTM.toFixed(1)} (${selectedItem.pePercentile}% 分位)` : '-- (无估值数据)'}</span>
                 </div>
                 <div className="flex justify-between">
                   <span className="text-slate-400">市净率 PB:</span>
-                  <span className="text-slate-200">{selectedItem.pb > 0 ? selectedItem.pb.toFixed(2) : '--'} ({selectedItem.pbPercentile}% 分位)</span>
+                  <span className="text-slate-200">{selectedItem.pb > 0 ? `${selectedItem.pb.toFixed(2)} (${selectedItem.pbPercentile}% 分位)` : '-- (无估值数据)'}</span>
                 </div>
                 <div className="flex justify-between">
                   <span className="text-slate-400">股息率:</span>
@@ -640,7 +644,7 @@ export const InstrumentDeepAnalysisPanel: React.FC<InstrumentDeepAnalysisPanelPr
             </div>
           </div>
 
-          {/* 历史 3 年 PE/PB 估值分位区间图谱 (利用 historicalValuation 字段展示相对于历史 3 年的区间与三色带) */}
+          {/* 历史价格分位区间图谱（基于真实后复权收盘价，由 parquet bars 派生，非合成 PE/PB 估值） */}
           <HistoricalValuationRangeChart
             historicalValuation={selectedItem.instrument.historicalValuation}
             instrument={selectedItem.instrument}
@@ -798,7 +802,7 @@ export const InstrumentDeepAnalysisPanel: React.FC<InstrumentDeepAnalysisPanelPr
               </div>
             </div>
             <p className="text-xs text-slate-300 leading-relaxed">
-              “安全边际的秘密在于：以显著低于内在价值的价格买入资产。在我们的系统化模型中，PE/PB处于历史 20% 分位以内、且 ERP (股债风险溢价) 大于 5% 时，代表股权资产处于罕见的安全边际极值区，模型自动赋予 +12%~+25% 的仓位溢价。”
+              “安全边际的秘密在于：以显著低于内在价值的价格买入资产。在我们的情景模拟器中，当价格处于自身历史 20% 分位以内时，代表资产相对自身历史处于低位区，模拟演示赋予 +12%~+25% 的仓位溢价（模拟假设：真实行情仅含价格，无 PE/PB 估值字段）。”
             </p>
             <div className="mt-auto p-2.5 bg-slate-950/70 rounded border border-slate-800/80 text-[11px] font-mono text-slate-400">
               量化映射：<span className="text-cyan-300">CompositePercentile &lt; 20% → 1.25x 仓位溢价加码</span>
@@ -815,7 +819,7 @@ export const InstrumentDeepAnalysisPanel: React.FC<InstrumentDeepAnalysisPanelPr
               </div>
             </div>
             <p className="text-xs text-slate-300 leading-relaxed">
-              “投资的钟摆永远在亢奋泡沫与悲观低谷之间摆动，但绝不会长久停留在中心。当市场极度亢奋（估值分位 &gt; 80%）时，即便动量再好，潜在回报也在急剧萎缩、风险在迅速放大。模型在估值极高区强制施加 -35% 仓位折价防御，落袋为安。”
+              “投资的钟摆永远在亢奋泡沫与悲观低谷之间摆动，但绝不会长久停留在中心。当价格处于自身历史极高位（价格分位 &gt; 80%）时，即便动量再好，潜在回报也在急剧萎缩、风险在迅速放大。情景模拟器在高位区演示 -35% 仓位折价防御（模拟假设），落袋为安。”
             </p>
             <div className="mt-auto p-2.5 bg-slate-950/70 rounded border border-slate-800/80 text-[11px] font-mono text-slate-400">
               量化映射：<span className="text-rose-400">CompositePercentile &gt; 80% → 0.65x 强制折价止盈防御</span>

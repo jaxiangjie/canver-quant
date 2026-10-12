@@ -556,5 +556,6 @@ const RAW_INITIAL_INSTRUMENTS: AShareInstrument[] = [
 
 export const INITIAL_INSTRUMENTS: AShareInstrument[] = RAW_INITIAL_INSTRUMENTS.map((inst) => ({
   ...inst,
-  historicalValuation: generate3YearValuationHistory(inst),
+  // 仅 mock/演示模式：合成 PE/PB 估值序列。真实路径由 parquet bars → generatePricePercentileHistory 派生。
+historicalValuation: generate3YearValuationHistory(inst),
 }));

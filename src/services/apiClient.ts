@@ -51,7 +51,8 @@ export function hydrateInstrument(raw: any): AShareInstrument {
     pb: Number(raw?.pb ?? 1.45),
     pePercentile: Number(raw?.pePercentile ?? (raw?.category === 'bond_etf' || raw?.category === 'commodity_etf' ? 50 : 35)),
     pbPercentile: Number(raw?.pbPercentile ?? (raw?.category === 'bond_etf' || raw?.category === 'commodity_etf' ? 50 : 30)),
-    historicalValuation: Array.isArray(raw?.historicalValuation) && raw.historicalValuation.length > 0
+    // 演示模式兜底：无真实估值数据时合成 PE/PB 序列（真实行情无此字段，图表已改用价格分位）。
+historicalValuation: Array.isArray(raw?.historicalValuation) && raw.historicalValuation.length > 0
       ? raw.historicalValuation
       : generate3YearValuationHistory({
           category: raw?.category || (isETF ? 'broad_etf' : 'stock_cn'),
@@ -78,6 +79,21 @@ export class AShareDataService {
         if (Array.isArray(data) && data.length > 0) {
           const hydrated = data.map(hydrateInstrument);
           localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(hydrated));
+          // 静默异步加载估值历史序列，供前端回测与图表消费
+          fetch('/api/ashare/valuation-series')
+            .then(r => r.ok ? r.json() : null)
+            .then(seriesObj => {
+              if (seriesObj && typeof seriesObj === 'object') {
+                import('./valuationStore').then(vs => {
+                  const map = new Map<string, any[]>();
+                  for (const [k, v] of Object.entries(seriesObj)) {
+                    if (Array.isArray(v)) map.set(k, v);
+                  }
+                  vs.setClientValuationSeries(map);
+                });
+              }
+            })
+            .catch(() => {});
           return hydrated;
         }
       }

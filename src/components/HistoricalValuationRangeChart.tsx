@@ -1,10 +1,9 @@
 import React, { useRef, useState, useMemo, useEffect } from 'react';
 import * as d3 from 'd3';
 import { AShareInstrument, HistoricalValuationPoint } from '../types/ashare';
-import { generate3YearValuationHistory } from '../services/ashareStrategies';
+import { generatePricePercentileHistory } from '../services/ashareStrategies';
 import { 
   BarChart2, 
-  ShieldCheck, 
   AlertTriangle, 
   Activity, 
   TrendingUp, 
@@ -40,9 +39,8 @@ export const HistoricalValuationRangeChart: React.FC<HistoricalValuationRangeCha
   const [tooltipPos, setTooltipPos] = useState<{ x: number; y: number } | null>(null);
   const [containerWidth, setContainerWidth] = useState<number>(720);
 
-  const isCommodityOrBond = instrument.category === 'bond_etf' || instrument.category === 'commodity_etf';
-
-  // 确保数据源完整：优先读取 instrument.historicalValuation 字段，若空则基于3年宏观周期自动补充
+  // 数据源：优先用外部/标的自带历史序列；缺失则由真实 parquet bars 派生（generatePricePercentileHistory），
+  // 不再回退到任何合成 PE/PB 估值序列。无真实行情时返回 []，由下方空态提示。
   const valuationData = useMemo<HistoricalValuationPoint[]>(() => {
     if (historicalValuation && historicalValuation.length > 0) {
       return historicalValuation;
@@ -50,18 +48,19 @@ export const HistoricalValuationRangeChart: React.FC<HistoricalValuationRangeCha
     if (instrument.historicalValuation && instrument.historicalValuation.length > 0) {
       return instrument.historicalValuation;
     }
-    return generate3YearValuationHistory(instrument);
+    return generatePricePercentileHistory(instrument);
   }, [historicalValuation, instrument]);
 
-  // 当前值计算
-  const effectivePEPct = currentPEPercentile ?? instrument.pePercentile ?? 50;
-  const effectivePBPct = currentPBPercentile ?? instrument.pbPercentile ?? 50;
-  const effectivePE = currentPETTM ?? instrument.peTTM ?? 0;
-  const effectivePB = currentPB ?? instrument.pb ?? 0;
+  // 当前分位/价格：优先用调用方显式传入；否则从真实序列末点（=最新收盘价分位）派生，确保"当前标记"与曲线末点对齐
+  const lastPoint = valuationData[valuationData.length - 1];
+  const effectivePEPct = currentPEPercentile ?? lastPoint?.pePercentile ?? instrument.pePercentile ?? 50;
+  const effectivePBPct = currentPBPercentile ?? lastPoint?.pbPercentile ?? instrument.pbPercentile ?? 50;
+  const effectivePE = currentPETTM ?? lastPoint?.pe ?? instrument.peTTM ?? 0;
+  const effectivePB = currentPB ?? lastPoint?.pb ?? instrument.pb ?? 0;
 
   // 3年历史极值与统计区间计算
   const stats3Y = useMemo(() => {
-    if (valuationData.length === 0 || isCommodityOrBond) {
+    if (valuationData.length === 0) {
       return {
         peMinPct: 0, peMaxPct: 100, peMedianPct: 50,
         pbMinPct: 0, pbMaxPct: 100, pbMedianPct: 50,
@@ -89,45 +88,45 @@ export const HistoricalValuationRangeChart: React.FC<HistoricalValuationRangeCha
       pbMinVal: pbVals.length ? Math.min(...pbVals) : effectivePB * 0.7,
       pbMaxVal: pbVals.length ? Math.max(...pbVals) : effectivePB * 1.4,
     };
-  }, [valuationData, isCommodityOrBond, effectivePE, effectivePB]);
+  }, [valuationData, effectivePE, effectivePB]);
 
-  // 估值色带区域判定助手
+  // 注：本图谱为"价格相对分位"，非 PE/PB 估值分位。价格处历史低位 ≠ 基本面低估，仅表示相对自身历史便宜。
   const getZoneInfo = (pct: number) => {
     if (pct < 20) {
       return {
         zone: 'UNDERVALUED',
-        label: '低估区间 (<20%)',
+        label: '价格低位 (<20%)',
         color: '#10B981',
         bgColor: 'bg-emerald-950/70',
         borderColor: 'border-emerald-700/60',
         textColor: 'text-emerald-400',
-        badge: '极高安全边际 · 价值保护',
-        suggestion: '估值处历史 3 年绝对低估区间，安全边际极深，建议激活 1.25x 超配乘数',
-        multiplier: '1.25x 溢价',
+        badge: '价格处历史相对低位',
+        suggestion: '当前价格位于自身历史（近1/近3年窗口）后 20% 分位，相对自身历史偏便宜，下行安全垫较厚',
+        reference: '相对自身历史便宜',
       };
     } else if (pct <= 80) {
       return {
         zone: 'FAIR',
-        label: '合理中枢 (20%-80%)',
+        label: '价格中位 (20%-80%)',
         color: '#38BDF8',
         bgColor: 'bg-sky-950/50',
         borderColor: 'border-sky-800/50',
         textColor: 'text-sky-400',
-        badge: '均值常态区间 · 均衡配置',
-        suggestion: '估值处历史 3 年合理均值区间，遵循卡弗系统化波动率平价与动量常规预算',
-        multiplier: '1.00x 基准',
+        badge: '价格中位常态区间',
+        suggestion: '当前价格处于自身历史中位区间，遵循卡弗系统化波动率平价与动量常规预算',
+        reference: '处于历史中位',
       };
     } else {
       return {
         zone: 'OVERVALUED',
-        label: '高估区域 (>80%)',
+        label: '价格高位 (>80%)',
         color: '#F43F5E',
         bgColor: 'bg-rose-950/70',
         borderColor: 'border-rose-700/60',
         textColor: 'text-rose-400',
-        badge: '泡沫防范风险 · 警惕双杀',
-        suggestion: '估值已触及过去 3 年泡沫高位，均值回归压力显著，建议压降至 0.65x~0.85x',
-        multiplier: '0.65x 折价',
+        badge: '价格处历史相对高位',
+        suggestion: '当前价格位于自身历史前 20% 分位，相对自身历史偏贵，注意回撤风险',
+        reference: '相对自身历史偏贵',
       };
     }
   };
@@ -419,7 +418,7 @@ export const HistoricalValuationRangeChart: React.FC<HistoricalValuationRangeCha
     const lastDataPoint = valuationData[valuationData.length - 1];
     const lastX = xScale(lastDataPoint.date) ?? innerWidth;
 
-    if (lastDataPoint && !isCommodityOrBond) {
+    if (lastDataPoint) {
       if (metricMode === 'both' || metricMode === 'pe') {
         const lastPEY = yScale(effectivePEPct);
 
@@ -557,7 +556,7 @@ export const HistoricalValuationRangeChart: React.FC<HistoricalValuationRangeCha
         setTooltipPos(null);
       });
 
-  }, [valuationData, containerWidth, metricMode, effectivePEPct, effectivePBPct, isCommodityOrBond]);
+  }, [valuationData, containerWidth, metricMode, effectivePEPct, effectivePBPct]);
 
   return (
     <div 
@@ -573,7 +572,7 @@ export const HistoricalValuationRangeChart: React.FC<HistoricalValuationRangeCha
           <div>
             <div className="flex items-center gap-2">
               <h3 className="text-sm font-bold text-slate-100 tracking-tight">
-                历史 3 年 PE/PB 估值分位区间深度分析图谱
+                历史价格分位区间图谱（基于真实后复权收盘价）
               </h3>
               <span className="text-[10px] px-2 py-0.5 rounded font-mono bg-cyan-950/80 text-cyan-300 border border-cyan-800/60 font-semibold">
                 historicalValuation 驱动
@@ -583,7 +582,7 @@ export const HistoricalValuationRangeChart: React.FC<HistoricalValuationRangeCha
               </span>
             </div>
             <p className="text-[11px] text-slate-400 mt-0.5">
-              精确量化标的当前估值分位点相对于过去 3 年（12季度）历史周期的相对位置，通过低估/中枢/高估三色带锚定格雷厄姆安全边际。
+              以真实后复权收盘价，量化标的当前价格处于自身历史（近1年 / 近3年窗口）的相对分位，通过低位/中位/高位三色带呈现。
             </p>
           </div>
         </div>
@@ -598,7 +597,7 @@ export const HistoricalValuationRangeChart: React.FC<HistoricalValuationRangeCha
                 : 'text-slate-400 hover:text-slate-200'
             }`}
           >
-            PE + PB 双轨
+            近1年 + 近3年 双轨
           </button>
           <button
             onClick={() => setMetricMode('pe')}
@@ -608,7 +607,7 @@ export const HistoricalValuationRangeChart: React.FC<HistoricalValuationRangeCha
                 : 'text-slate-400 hover:text-slate-200'
             }`}
           >
-            仅 PE 分位
+            仅 近1年分位
           </button>
           <button
             onClick={() => setMetricMode('pb')}
@@ -618,20 +617,18 @@ export const HistoricalValuationRangeChart: React.FC<HistoricalValuationRangeCha
                 : 'text-slate-400 hover:text-slate-200'
             }`}
           >
-            仅 PB 分位
+            仅 近3年分位
           </button>
         </div>
       </div>
 
-      {/* 特殊标的提示（如纯债或商品ETF） */}
-      {isCommodityOrBond ? (
+      {/* 空态：无真实价格历史（不再用合成 PE/PB 填充） */}
+      {valuationData.length === 0 ? (
         <div className="p-4 bg-slate-950/70 border border-slate-800 rounded-lg text-xs text-slate-400 flex items-start gap-3">
-          <ShieldCheck className="w-5 h-5 text-indigo-400 mt-0.5 shrink-0" />
+          <AlertTriangle className="w-5 h-5 text-amber-400 mt-0.5 shrink-0" />
           <div className="leading-relaxed">
-            <span className="font-semibold text-slate-200">无企业盈利或净资产口径（纯债/商品类资产）</span>：
-            {instrument.name} 作为{instrument.category === 'bond_etf' ? '固收/债券ETF' : '大宗商品/黄金ETF'}，
-            不适用股票类市盈率 (PE-TTM) 与市净率 (PB) 估值模型。
-            系统在此类资产上自动采用固定基准中枢（50%分位），其头寸规模由卡弗真实波动率与期限结构动量全权驱动。
+            <span className="font-semibold text-slate-200">暂无真实价格历史</span>：
+            {instrument.name} 当前未加载到真实后复权日线（parquet 行情），无法绘制价格分位区间。请先在数据适配（adapter）中载入该标的行情。
           </div>
         </div>
       ) : (
@@ -645,10 +642,10 @@ export const HistoricalValuationRangeChart: React.FC<HistoricalValuationRangeCha
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-2">
                   <span className="w-2.5 h-2.5 rounded-full bg-cyan-400"></span>
-                  <span className="text-xs font-bold text-slate-200">PE-TTM 历史 3 年区间定位</span>
-                  <span className="text-xs font-mono font-semibold text-cyan-300">
-                    {effectivePE > 0 ? `${effectivePE.toFixed(1)}x` : '--'}
-                  </span>
+                <span className="text-xs font-bold text-slate-200">近 1 年价格分位区间（真实收盘价）</span>
+                <span className="text-xs font-mono font-semibold text-cyan-300">
+                  {effectivePE > 0 ? `${effectivePE.toFixed(2)}` : '--'}
+                </span>
                 </div>
                 <div className="flex items-center gap-1.5">
                   <span className={`text-[11px] font-bold px-2 py-0.5 rounded font-mono ${
@@ -668,19 +665,19 @@ export const HistoricalValuationRangeChart: React.FC<HistoricalValuationRangeCha
                   {/* 低估带 0-20% */}
                   <div className="w-[20%] bg-emerald-500/40 relative group">
                     <span className="absolute inset-0 flex items-center justify-center text-[9px] font-bold text-emerald-200 opacity-90">
-                      &lt;20% 低估
+                      &lt;20% 价格低位
                     </span>
                   </div>
                   {/* 中枢带 20-80% */}
                   <div className="w-[60%] bg-sky-500/20 relative group border-x border-slate-700/60">
                     <span className="absolute inset-0 flex items-center justify-center text-[9px] font-bold text-sky-200 opacity-80">
-                      20%-80% 合理中枢
+                      20%-80% 价格中位
                     </span>
                   </div>
                   {/* 高估带 80-100% */}
                   <div className="w-[20%] bg-rose-500/40 relative group">
                     <span className="absolute inset-0 flex items-center justify-center text-[9px] font-bold text-rose-200 opacity-90">
-                      &gt;80% 高估
+                      &gt;80% 价格高位
                     </span>
                   </div>
                 </div>
@@ -696,15 +693,15 @@ export const HistoricalValuationRangeChart: React.FC<HistoricalValuationRangeCha
 
                 {/* 区间极值与当前点注记 */}
                 <div className="flex justify-between text-[10px] font-mono text-slate-400 mt-2">
-                  <span>3年极低: {stats3Y.peMinPct}% ({stats3Y.peMinVal.toFixed(1)}x)</span>
+                  <span>区间极低: {stats3Y.peMinPct}% ({stats3Y.peMinVal.toFixed(2)})</span>
                   <span className="text-cyan-300 font-bold">现值: {effectivePEPct}% 分位</span>
-                  <span>3年极高: {stats3Y.peMaxPct}% ({stats3Y.peMaxVal.toFixed(1)}x)</span>
+                  <span>区间极高: {stats3Y.peMaxPct}% ({stats3Y.peMaxVal.toFixed(2)})</span>
                 </div>
               </div>
 
               <div className="text-[11px] text-slate-300 bg-slate-950/60 p-2 rounded border border-slate-800/80 leading-relaxed flex items-center justify-between">
                 <span>{peZone.suggestion}</span>
-                <span className="font-mono font-bold text-cyan-300 shrink-0 ml-2">{peZone.multiplier}</span>
+                <span className="font-mono font-bold text-cyan-300 shrink-0 ml-2">{peZone.reference}</span>
               </div>
             </div>
 
@@ -713,10 +710,10 @@ export const HistoricalValuationRangeChart: React.FC<HistoricalValuationRangeCha
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-2">
                   <span className="w-2.5 h-2.5 rounded-full bg-purple-400"></span>
-                  <span className="text-xs font-bold text-slate-200">市净率 PB 历史 3 年区间定位</span>
-                  <span className="text-xs font-mono font-semibold text-purple-300">
-                    {effectivePB > 0 ? `${effectivePB.toFixed(2)}x` : '--'}
-                  </span>
+                <span className="text-xs font-bold text-slate-200">近 3 年价格分位区间（真实收盘价）</span>
+                <span className="text-xs font-mono font-semibold text-purple-300">
+                  {effectivePB > 0 ? `${effectivePB.toFixed(2)}` : '--'}
+                </span>
                 </div>
                 <div className="flex items-center gap-1.5">
                   <span className={`text-[11px] font-bold px-2 py-0.5 rounded font-mono ${
@@ -734,17 +731,17 @@ export const HistoricalValuationRangeChart: React.FC<HistoricalValuationRangeCha
                 <div className="h-3 w-full rounded-full flex overflow-hidden border border-slate-700/60 shadow-inner">
                   <div className="w-[20%] bg-emerald-500/40 relative">
                     <span className="absolute inset-0 flex items-center justify-center text-[9px] font-bold text-emerald-200 opacity-90">
-                      &lt;20% 低估
+                      &lt;20% 价格低位
                     </span>
                   </div>
                   <div className="w-[60%] bg-purple-500/20 relative border-x border-slate-700/60">
                     <span className="absolute inset-0 flex items-center justify-center text-[9px] font-bold text-purple-200 opacity-80">
-                      20%-80% 合理中枢
+                      20%-80% 价格中位
                     </span>
                   </div>
                   <div className="w-[20%] bg-rose-500/40 relative">
                     <span className="absolute inset-0 flex items-center justify-center text-[9px] font-bold text-rose-200 opacity-90">
-                      &gt;80% 高估
+                      &gt;80% 价格高位
                     </span>
                   </div>
                 </div>
@@ -759,15 +756,15 @@ export const HistoricalValuationRangeChart: React.FC<HistoricalValuationRangeCha
                 </div>
 
                 <div className="flex justify-between text-[10px] font-mono text-slate-400 mt-2">
-                  <span>3年极低: {stats3Y.pbMinPct}% ({stats3Y.pbMinVal.toFixed(2)}x)</span>
+                  <span>区间极低: {stats3Y.pbMinPct}% ({stats3Y.pbMinVal.toFixed(2)})</span>
                   <span className="text-purple-300 font-bold">现值: {effectivePBPct}% 分位</span>
-                  <span>3年极高: {stats3Y.pbMaxPct}% ({stats3Y.pbMaxVal.toFixed(2)}x)</span>
+                  <span>区间极高: {stats3Y.pbMaxPct}% ({stats3Y.pbMaxVal.toFixed(2)})</span>
                 </div>
               </div>
 
               <div className="text-[11px] text-slate-300 bg-slate-950/60 p-2 rounded border border-slate-800/80 leading-relaxed flex items-center justify-between">
                 <span>{pbZone.suggestion}</span>
-                <span className="font-mono font-bold text-purple-300 shrink-0 ml-2">{pbZone.multiplier}</span>
+                <span className="font-mono font-bold text-purple-300 shrink-0 ml-2">{pbZone.reference}</span>
               </div>
             </div>
           </div>
@@ -782,19 +779,19 @@ export const HistoricalValuationRangeChart: React.FC<HistoricalValuationRangeCha
           <div className="flex items-center gap-4 text-slate-400">
             <span className="flex items-center gap-1.5">
               <span className="w-3 h-0.5 bg-cyan-400 inline-block"></span>
-              <span className="font-mono">PE-TTM 分位点轨迹</span>
+              <span className="font-mono">近1年价格分位点轨迹</span>
             </span>
             <span className="flex items-center gap-1.5">
               <span className="w-3 h-0.5 bg-purple-400 inline-block"></span>
-              <span className="font-mono">PB 市净率分位点轨迹</span>
+              <span className="font-mono">近3年价格分位点轨迹</span>
             </span>
           </div>
           <div className="flex items-center gap-2 text-[11px] text-slate-400 font-mono">
-            <span>绿色底带: &lt;20% 安全边际</span>
+            <span>绿色底带: &lt;20% 价格低位</span>
             <span>·</span>
-            <span>蓝色底带: 20-80% 中枢</span>
+            <span>蓝色底带: 20-80% 价格中位</span>
             <span>·</span>
-            <span>红色底带: &gt;80% 泡沫风险</span>
+            <span>红色底带: &gt;80% 价格高位</span>
           </div>
         </div>
 
@@ -816,21 +813,21 @@ export const HistoricalValuationRangeChart: React.FC<HistoricalValuationRangeCha
                 hoveredPoint.pePercentile > 80 ? 'bg-rose-950 text-rose-300 border border-rose-800' :
                 'bg-slate-800 text-slate-300'
               }`}>
-                {hoveredPoint.pePercentile < 20 ? '低估区间' : hoveredPoint.pePercentile > 80 ? '高估区间' : '合理中枢'}
+                {hoveredPoint.pePercentile < 20 ? '价格低位' : hoveredPoint.pePercentile > 80 ? '价格高位' : '价格中位'}
               </span>
             </div>
 
             <div className="flex flex-col gap-1 text-[11px]">
               <div className="flex justify-between gap-4">
-                <span className="text-cyan-400">PE-TTM 分位:</span>
-                <span className="text-white font-bold">{hoveredPoint.pePercentile}% ({hoveredPoint.pe}x)</span>
+                <span className="text-cyan-400">近1年价格分位:</span>
+                <span className="text-white font-bold">{hoveredPoint.pePercentile}% ({hoveredPoint.pe.toFixed(2)})</span>
               </div>
               <div className="flex justify-between gap-4">
-                <span className="text-purple-400">PB 市净率分位:</span>
-                <span className="text-white font-bold">{hoveredPoint.pbPercentile}% ({hoveredPoint.pb}x)</span>
+                <span className="text-purple-400">近3年价格分位:</span>
+                <span className="text-white font-bold">{hoveredPoint.pbPercentile}% ({hoveredPoint.pb.toFixed(2)})</span>
               </div>
               <div className="flex justify-between gap-4 pt-1 border-t border-slate-800 text-slate-400">
-                <span>综合估值分位:</span>
+                <span>综合价格分位:</span>
                 <span className="text-emerald-400 font-bold">{hoveredPoint.compositePercentile}%</span>
               </div>
             </div>
@@ -841,34 +838,34 @@ export const HistoricalValuationRangeChart: React.FC<HistoricalValuationRangeCha
       {/* 底部3年极值统计与策略联动小卡片 */}
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs font-mono">
         <div className="p-2.5 bg-slate-950/70 border border-slate-800/80 rounded flex flex-col justify-between">
-          <span className="text-slate-400 text-[11px]">3年 PE 最低点 (底部)</span>
+          <span className="text-slate-400 text-[11px]">近1年价格最低分位</span>
           <div className="mt-1">
             <span className="text-emerald-400 font-bold text-sm">{stats3Y.peMinPct}% 分位</span>
-            <span className="text-[10px] text-slate-400 block">({stats3Y.peMinVal.toFixed(1)}x)</span>
+            <span className="text-[10px] text-slate-400 block">({stats3Y.peMinVal.toFixed(2)})</span>
           </div>
         </div>
 
         <div className="p-2.5 bg-slate-950/70 border border-slate-800/80 rounded flex flex-col justify-between">
-          <span className="text-slate-400 text-[11px]">3年 PE 中位数 (中枢)</span>
+          <span className="text-slate-400 text-[11px]">近1年价格中位分位</span>
           <div className="mt-1">
             <span className="text-sky-400 font-bold text-sm">{stats3Y.peMedianPct}% 分位</span>
-            <span className="text-[10px] text-slate-400 block">常态回归基准</span>
+            <span className="text-[10px] text-slate-400 block">历史中位基准</span>
           </div>
         </div>
 
         <div className="p-2.5 bg-slate-950/70 border border-slate-800/80 rounded flex flex-col justify-between">
-          <span className="text-slate-400 text-[11px]">3年 PE 最高点 (峰值)</span>
+          <span className="text-slate-400 text-[11px]">近1年价格最高分位</span>
           <div className="mt-1">
             <span className="text-rose-400 font-bold text-sm">{stats3Y.peMaxPct}% 分位</span>
-            <span className="text-[10px] text-slate-400 block">({stats3Y.peMaxVal.toFixed(1)}x)</span>
+            <span className="text-[10px] text-slate-400 block">({stats3Y.peMaxVal.toFixed(2)})</span>
           </div>
         </div>
 
         <div className="p-2.5 bg-slate-950/70 border border-slate-800/80 rounded flex flex-col justify-between">
-          <span className="text-slate-400 text-[11px]">卡弗仓位联动乘数</span>
+          <span className="text-slate-400 text-[11px]">价格分位联动参考</span>
           <div className="mt-1">
             <span className={`text-sm font-bold ${peZone.textColor}`}>
-              {peZone.multiplier}
+              {peZone.reference}
             </span>
             <span className="text-[10px] text-slate-400 block">{peZone.badge}</span>
           </div>

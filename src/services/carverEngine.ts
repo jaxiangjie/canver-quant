@@ -22,13 +22,68 @@ export const DEFAULT_CARVER_SETTINGS: CarverSettings = {
   idmMode: 'auto',               // 默认动态自适应计算 IDM，支持手动调节
   manualIDM: 1.45,               // 手动设定值（推荐区间 1.20 - 1.80）
   maxIDM: 1.80,                  // IDM 放大倍数上限 1.80
-  useERPTilt: true,              // 启用 A 股股债收益差 ERP 逆向战术偏置
+  useERPTilt: false,             // A股 ERP 逆向战术偏置：闸门④回测(2008-2026,216次再平衡)增量噪声级(Sharpe+0.00)，默认关；重验见 scripts/gate4_compare.ts
   enforceTargetVol: true,        // 目标波动即基准敞口：中性=1.0x 满仓，让目标波动率真正生效（非上限）
   stockCommissionRate: 0.00025,  // 万2.5
   etfCommissionRate: 0.0001,     // 万1
   stockStampDuty: 0.0005,        // 股票卖出千分之0.5
   slippageBps: 5,                // 5个基点滑点
 };
+
+/**
+ * 缓冲带决策（死区 + 回差调仓 + 最低调仓门槛）。
+ * 单标的 calculateInstrumentPosition 与组合层 calculatePortfolio 第二遍共用同一套逻辑，
+ * 避免组合层重算时把 hysteresisBuffer / minTradeAmount 静默丢弃（早前的 bug：组合层忽略了这两个开关）。
+ */
+function resolveBufferDecision(
+  currentShares: number,
+  targetShares: number,
+  currentPrice: number,
+  settings: CarverSettings
+): { withinBuffer: boolean; action: 'BUY' | 'SELL' | 'HOLD'; recommendedShares: number } {
+  let withinBuffer = false;
+  let action: 'BUY' | 'SELL' | 'HOLD' = 'HOLD';
+  let recommendedShares = 0;
+
+  if (targetShares === 0 && currentShares > 0) {
+    withinBuffer = false;
+    action = 'SELL';
+    recommendedShares = currentShares;
+  } else if (currentShares === 0 && targetShares > 0) {
+    withinBuffer = false;
+    action = 'BUY';
+    recommendedShares = targetShares;
+  } else if (targetShares > 0) {
+    const deviationRatio = Math.abs(targetShares - currentShares) / targetShares;
+    const threshold = settings.bufferThreshold ?? 0.12;
+    if (deviationRatio <= threshold) {
+      withinBuffer = true;
+      action = 'HOLD';
+      recommendedShares = 0;
+    } else {
+      action = targetShares > currentShares ? 'BUY' : 'SELL';
+      // 卡弗进阶：回差调仓 (Hysteresis Rebalance)
+      // 触发后不一脚拉回靶心，而是只调至缓冲带边界（只调超出缓冲带的部分），节省 25%~35% 摩擦成本
+      if (settings.hysteresisBuffer !== false) {
+        const bufferDistanceShares = Math.floor((targetShares * threshold) / 100) * 100;
+        const adjustedDelta = Math.max(100, Math.abs(targetShares - currentShares) - bufferDistanceShares);
+        recommendedShares = Math.floor(adjustedDelta / 100) * 100;
+      } else {
+        recommendedShares = Math.floor(Math.abs(targetShares - currentShares) / 100) * 100;
+      }
+      // 最低调仓金额门槛校验（防几十几百元碎股交易浪费最低佣金）
+      const minTrade = settings.minTradeAmount ?? 2000;
+      if (recommendedShares * currentPrice < minTrade) {
+        withinBuffer = true;
+        action = 'HOLD';
+        recommendedShares = 0;
+      } else {
+        withinBuffer = false;
+      }
+    }
+  }
+  return { withinBuffer, action, recommendedShares };
+}
 
 /**
  * Calculate Carver Volatility Sizing for a single instrument
@@ -131,53 +186,13 @@ export function calculateInstrumentPosition(
   const targetCapital = targetShares * currentPrice;
   const targetWeight = targetCapital / settings.totalCapital;
 
-  // 6. Share Delta & Carver Buffer Band (死区缓冲带检测)
+  // 6. Share Delta & Carver Buffer Band (死区缓冲带检测，含回差调仓与最低调仓门槛)
   const shareDelta = targetShares - currentShares;
   const capitalDelta = shareDelta * currentPrice;
 
-  let withinBuffer = false;
-  let action: 'BUY' | 'SELL' | 'HOLD' = 'HOLD';
-  let recommendedShares = 0;
-
-  if (targetShares === 0 && currentShares > 0) {
-    withinBuffer = false;
-    action = 'SELL';
-    recommendedShares = currentShares;
-  } else if (currentShares === 0 && targetShares > 0) {
-    withinBuffer = false;
-    action = 'BUY';
-    recommendedShares = targetShares;
-  } else if (targetShares > 0) {
-    const deviationRatio = Math.abs(shareDelta) / targetShares;
-    const threshold = settings.bufferThreshold ?? 0.12;
-    if (deviationRatio <= threshold) {
-      withinBuffer = true;
-      action = 'HOLD';
-      recommendedShares = 0;
-    } else {
-      action = shareDelta > 0 ? 'BUY' : 'SELL';
-      
-      // 卡弗进阶：回差调仓 (Hysteresis Rebalance)
-      // 触发后不一脚拉回靶心，而是调至缓冲带边界（只调超出缓冲带的部分），节省 25%~35% 的摩擦成本
-      if (settings.hysteresisBuffer !== false) {
-        const bufferDistanceShares = Math.floor((targetShares * threshold) / 100) * 100;
-        const adjustedDelta = Math.max(100, Math.abs(shareDelta) - bufferDistanceShares);
-        recommendedShares = Math.floor(adjustedDelta / 100) * 100;
-      } else {
-        recommendedShares = Math.floor(Math.abs(shareDelta) / 100) * 100;
-      }
-
-      // 最低调仓金额门槛校验 (防止几十几百元小额碎股交易浪费最低佣金)
-      const minTrade = settings.minTradeAmount ?? 2000;
-      if (recommendedShares * currentPrice < minTrade) {
-        withinBuffer = true;
-        action = 'HOLD';
-        recommendedShares = 0;
-      } else {
-        withinBuffer = false;
-      }
-    }
-  }
+  const { withinBuffer, action, recommendedShares } = resolveBufferDecision(
+    currentShares, targetShares, currentPrice, settings
+  );
 
   // 7. Transaction Cost Estimation (Commission, Stamp Duty, Slippage)
   const turnoverCapital = recommendedShares * currentPrice;
@@ -264,30 +279,9 @@ export function calculatePortfolio(
     const shareDelta = targetShares - currentShares;
     const capitalDelta = shareDelta * currentPrice;
 
-    let withinBuffer = false;
-    let action: 'BUY' | 'SELL' | 'HOLD' = 'HOLD';
-    let recommendedShares = 0;
-
-    if (targetShares === 0 && currentShares > 0) {
-      withinBuffer = false;
-      action = 'SELL';
-      recommendedShares = currentShares;
-    } else if (currentShares === 0 && targetShares > 0) {
-      withinBuffer = false;
-      action = 'BUY';
-      recommendedShares = targetShares;
-    } else if (targetShares > 0) {
-      const deviationRatio = Math.abs(shareDelta) / targetShares;
-      if (deviationRatio <= settings.bufferThreshold) {
-        withinBuffer = true;
-        action = 'HOLD';
-        recommendedShares = 0;
-      } else {
-        withinBuffer = false;
-        action = shareDelta > 0 ? 'BUY' : 'SELL';
-        recommendedShares = Math.abs(shareDelta);
-      }
-    }
+    const { withinBuffer, action, recommendedShares } = resolveBufferDecision(
+      currentShares, targetShares, currentPrice, settings
+    );
 
     const turnoverCapital = recommendedShares * currentPrice;
     const commissionRate = inst.isETF ? settings.etfCommissionRate : settings.stockCommissionRate;

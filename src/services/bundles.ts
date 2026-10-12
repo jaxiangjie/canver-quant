@@ -31,12 +31,12 @@ export const DEFAULT_BUNDLES: InstrumentBundle[] = [
   {
     id: SELECT_ETF5_ID,
     name: '精选高夏普 ETF 5 腿 (方案B)',
-    description: '优选高夏普与成长红利组合 (500+红利低波+黄金+纳指+300)，剔除负收益拖累，年化突破 10%+',
+    description: '优选高夏普与成长红利组合 (500+红利低波+黄金+纳指+300)，剔除负收益拖累；18% 目标波动下 Carver 回测年化约 8.2%（3089 日样本，以回测 Tab 实测为准）',
     items: [
-      { id: '510500', riskBudgetWeight: 0.30 }, // 中证500ETF (历史CAGR 16%)
-      { id: '512890', riskBudgetWeight: 0.25 }, // 红利低波ETF (历史CAGR 11.3%)
-      { id: '518880', riskBudgetWeight: 0.20 }, // 黄金ETF (历史CAGR 9.4%)
-      { id: '513100', riskBudgetWeight: 0.15 }, // 纳指ETF (历史CAGR 6.8%)
+      { id: '510500', riskBudgetWeight: 0.30 }, // 中证500ETF
+      { id: '512890', riskBudgetWeight: 0.25 }, // 红利低波ETF
+      { id: '518880', riskBudgetWeight: 0.20 }, // 黄金ETF
+      { id: '513100', riskBudgetWeight: 0.15 }, // 纳指ETF
       { id: '510300', riskBudgetWeight: 0.10 }, // 沪深300ETF (核心基准)
     ],
   },

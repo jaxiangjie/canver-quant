@@ -112,6 +112,9 @@ export function mergeStores(base: any[], persisted: any[], deletedCodes: string[
     if (b) {
       if (typeof p.currentShares === 'number') b.currentShares = p.currentShares;
       if (typeof p.riskBudgetWeight === 'number') b.riskBudgetWeight = p.riskBudgetWeight;
+      // 估值字段：仅有效值(>0)覆盖，避免重启时 parquet 重建（peTTM=0）冲掉同步所得
+      if (typeof p.peTTM === 'number' && p.peTTM > 0) b.peTTM = p.peTTM;
+      if (typeof p.pb === 'number' && p.pb > 0) b.pb = p.pb;
     } else {
       appended.push(p);
     }

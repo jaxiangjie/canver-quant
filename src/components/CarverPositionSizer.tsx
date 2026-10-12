@@ -385,11 +385,11 @@ export const CarverPositionSizer: React.FC<CarverPositionSizerProps> = ({
                   </span>
                 </span>
                 <span className="font-mono text-xs">
-                  {settings.useERPTilt !== false ? '已开启 (估值底加仓)' : '未开启 (纯动量)'}
+                  {settings.useERPTilt !== false ? '已开启 (需 PE/PB 估值数据)' : '未开启 (纯动量)'}
                 </span>
               </div>
               <p className="text-[11px] text-slate-400 mt-1 leading-relaxed">
-                跟踪全市场 PE 倒数与 10 年期国债收益率差额。当大盘估值处于历史 80%+ 极度低估黄金坑时，为权益资产注入 1.15x~1.25x 逆向进攻偏置，右侧反弹时享受超额阿尔法。
+                跟踪全市场 PE 倒数与 10 年期国债收益率差额。当大盘估值处于历史 80%+ 极度低估黄金坑时，为权益资产注入 1.15x~1.25x 逆向进攻偏置，右侧反弹时享受超额阿尔法。⚠️ 当前真实行情仅含 OHLCV 价格、无 PE/PB 估值字段，估值分位恒为中位，该偏置在真实数据下不会触发（接入基本面数据后生效）。
               </p>
             </div>
           </div>

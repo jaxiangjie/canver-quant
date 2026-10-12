@@ -22,6 +22,7 @@ import {
   mergeStores,
 } from './src/services/persistence';
 import { syncAllInstruments } from './src/services/liveMarketSync';
+import { enrichUniverseValuation, loadValuationSeries } from './src/services/valuationStore';
 
 // In-memory data store for A-Share instruments (real parquet data if available, else mock)
 let instrumentsStore: any[] = [];
@@ -29,6 +30,20 @@ let instrumentsStore: any[] = [];
 // REST API Endpoints for A-Share Data Interface
 app.get('/api/ashare/instruments', (_req, res) => {
   res.json(instrumentsStore);
+});
+
+// 估值历史序列（提供给前端回测与图表消费，无须浏览器端直接读文件系统）
+app.get('/api/ashare/valuation-series', async (_req, res) => {
+  try {
+    const seriesMap = loadValuationSeries();
+    const result: Record<string, any[]> = {};
+    for (const [k, v] of seriesMap.entries()) {
+      result[k] = v;
+    }
+    res.json(result);
+  } catch (err: any) {
+    res.status(500).json({ error: err?.message || 'Failed to load valuation series' });
+  }
 });
 
 // 数据时效与覆盖率检测
@@ -219,6 +234,19 @@ async function initStore() {
           `${persisted.deletedCodes?.length ? `, deleted=${persisted.deletedCodes.length}` : ''})`,
       );
     }
+  }
+
+  // 3. 估值富化：从快照库历史计算 pe/pb 分位（宽基 ETF 映射指数 PE）
+  try {
+    const enr = enrichUniverseValuation(base);
+    base = enr.instruments;
+    if (enr.report.enriched > 0) {
+      console.log(
+        `[valuation] enriched ${enr.report.enriched} instruments with real percentiles (skipped ${enr.report.skipped})`,
+      );
+    }
+  } catch (err: any) {
+    console.warn('[valuation] enrich failed:', err?.message);
   }
 
   instrumentsStore = base;

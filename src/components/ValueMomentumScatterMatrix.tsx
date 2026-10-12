@@ -262,7 +262,7 @@ export const ValueMomentumScatterMatrix: React.FC<ValueMomentumScatterMatrixProp
             <div className="grid grid-cols-2 gap-x-2 gap-y-1 py-1.5 text-[11px]">
               <div>价值安全得分: <span className="font-bold text-cyan-300 font-mono">{hoveredItem.valueScore}分</span></div>
               <div>动量风控得分: <span className="font-bold text-amber-300 font-mono">{hoveredItem.momentumRiskScore}分</span></div>
-              <div>PE历史分位: <span className="font-mono">{hoveredItem.pePercentile}%</span></div>
+              <div>PE历史分位: <span className="font-mono">{hoveredItem.pePercentile != null ? `${hoveredItem.pePercentile}%` : '无估值数据'}</span></div>
               <div>卡弗预测标量: <span className="font-mono font-bold text-emerald-300">{hoveredItem.carverForecastScalar > 0 ? `+${hoveredItem.carverForecastScalar}` : hoveredItem.carverForecastScalar}</span></div>
               <div>股债溢价 ERP: <span className="font-mono text-indigo-300">{hoveredItem.equityRiskPremium}%</span></div>
               <div>当前年化波动: <span className="font-mono">{(hoveredItem.annualizedVol * 100).toFixed(1)}%</span></div>
