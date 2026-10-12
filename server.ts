@@ -28,8 +28,111 @@ import { enrichUniverseValuation, loadValuationSeries } from './src/services/val
 let instrumentsStore: any[] = [];
 
 // REST API Endpoints for A-Share Data Interface
+// 响应瘦身：全量 bars（20 只 × ~4000 根 ≈ 17MB）使传输易失败，触发客户端降级路径
+// （浏览器直连同 + mock 兜底），曾造成真实行情被污染。前端按需经 /api/ashare/bars/:code 拉取 K 线。
+function stripBars(inst: any) {
+  const { bars, ...rest } = inst;
+  return { ...rest, barsCount: Array.isArray(bars) ? bars.length : 0 };
+}
+
 app.get('/api/ashare/instruments', (_req, res) => {
-  res.json(instrumentsStore);
+  res.json(instrumentsStore.map(stripBars));
+});
+
+// 按需全量 K 线（深度分析/风险贡献图等前端组件消费）
+app.get('/api/ashare/bars/:code', (req, res) => {
+  const code = String(req.params.code || '');
+  const inst = instrumentsStore.find(
+    (i) => i.id === code || i.code === code || i.code.split('.')[0] === code,
+  );
+  if (!inst) {
+    res.status(404).json({ error: `instrument not found: ${code}` });
+    return;
+  }
+  res.json({ code: inst.code, name: inst.name, bars: inst.bars || [] });
+});
+
+// 动态解析并补全任意 A 股 / ETF 标的信息（优先在已有池寻找，未找到则从实时接口获取最新行情）
+app.get('/api/ashare/resolve-symbol/:code', async (req, res) => {
+  try {
+    const rawCode = String(req.params.code || '').trim().toUpperCase();
+    const cleanNum = rawCode.replace(/\.(SH|SZ|BJ)$/i, '');
+    
+    // 1. 已有标的池快速命中
+    const existing = instrumentsStore.find(
+      (i) => i.id === cleanNum || i.code === rawCode || i.code.split('.')[0] === cleanNum
+    );
+    if (existing) {
+      return res.json({
+        success: true,
+        source: 'catalog',
+        instrument: stripBars(existing),
+      });
+    }
+
+    // 2. 标的池外：实时网络拉取腾讯行情快照
+    const { codeToTencentSymbol, fetchBatchTencentQuotes } = await import('./src/services/liveMarketSync');
+    const secid = codeToTencentSymbol(cleanNum);
+    const quotes = await fetchBatchTencentQuotes([secid]);
+    const q = quotes.get(secid);
+
+    if (!q || !q.name || q.currentPrice <= 0) {
+      return res.status(404).json({
+        success: false,
+        message: `无法解析代码 [${rawCode}]，请检查是否为有效的 A 股或 ETF 代码`,
+      });
+    }
+
+    // 推断标的分类与市场后缀
+    const isETF = cleanNum.startsWith('51') || cleanNum.startsWith('15') || cleanNum.startsWith('58') || cleanNum.startsWith('56');
+    const suffix = secid.startsWith('sh') ? 'SH' : 'SZ';
+    const fullCode = `${cleanNum}.${suffix}`;
+
+    let category: any = 'broad_etf';
+    if (isETF) {
+      if (cleanNum.startsWith('511') || cleanNum.startsWith('159')) category = 'bond_etf';
+      else if (cleanNum.startsWith('518') || cleanNum.startsWith('159937')) category = 'commodity_etf';
+      else if (cleanNum.startsWith('513')) category = 'qdii_etf';
+      else if (cleanNum.startsWith('56') || cleanNum.startsWith('512') || cleanNum.startsWith('515') || cleanNum.startsWith('159')) category = 'sector_etf';
+    } else {
+      category = 'stock_cn';
+    }
+
+    // 估算基准波动率 (行业ETF 32%，宽基 22%，个股 28%，国债 5%)
+    let estVol = 0.25;
+    if (category === 'sector_etf') estVol = 0.35;
+    else if (category === 'bond_etf') estVol = 0.05;
+    else if (category === 'qdii_etf') estVol = 0.28;
+    else if (category === 'commodity_etf') estVol = 0.18;
+
+    const resolvedInst: any = {
+      id: cleanNum,
+      code: fullCode,
+      name: q.name,
+      category,
+      isETF,
+      isT0: category === 'bond_etf' || category === 'commodity_etf' || category === 'qdii_etf',
+      stampDutyExempt: isETF,
+      currentPrice: q.currentPrice,
+      preClose: q.preClose,
+      changePct: q.preClose > 0 ? Number((((q.currentPrice - q.preClose) / q.preClose) * 100).toFixed(2)) : 0,
+      dailyATR: Number((q.currentPrice * (estVol / 15.8)).toFixed(4)),
+      annualizedVol: estVol,
+      riskBudgetWeight: 0.10,
+      currentShares: 0,
+      peTTM: q.peTTM,
+      pb: q.pb,
+      dataSource: 'realtime_synced',
+    };
+
+    res.json({
+      success: true,
+      source: 'live_network',
+      instrument: resolvedInst,
+    });
+  } catch (err: any) {
+    res.status(500).json({ success: false, message: err?.message || '解析失败' });
+  }
 });
 
 // 估值历史序列（提供给前端回测与图表消费，无须浏览器端直接读文件系统）
@@ -77,7 +180,7 @@ app.get('/api/ashare/sync-latest', async (_req, res) => {
     res.json({
       success: true,
       report,
-      instruments: instrumentsStore,
+      instruments: instrumentsStore.map(stripBars),
     });
   } catch (err: any) {
     console.error('[sync-latest] failed:', err);
@@ -97,7 +200,7 @@ app.post('/api/ashare/sync-latest', async (req, res) => {
     const codeMap = new Map(updatedInstruments.map(u => [u.id, u]));
     instrumentsStore = instrumentsStore.map(i => codeMap.get(i.id) || i);
     savePersistedStore(instrumentsStore, 'sync-latest');
-    res.json({ success: true, report, instruments: instrumentsStore });
+    res.json({ success: true, report, instruments: instrumentsStore.map(stripBars) });
   } catch (err: any) {
     res.status(500).json({ success: false, message: err?.message || 'Sync failed' });
   }
@@ -107,9 +210,31 @@ app.post('/api/ashare/ingest', (req, res) => {
   try {
     const { instruments } = req.body;
     if (Array.isArray(instruments) && instruments.length > 0) {
-      savePersistedStore(instruments, 'ingest'); // 先原子落盘，失败则直接抛错不污染内存
-      instrumentsStore = instruments;
-      res.json({ success: true, count: instruments.length, message: '数据接入成功（已持久化）' });
+      // 数据完整性防御：ingest 的语义是「用户操作结果提交」（持仓/权重变更），不是行情数据提交。
+      // 行情字段（currentPrice/bars/pe/pb/名称/类别等）一律以服务端为权威，仅接受
+      // currentShares/riskBudgetWeight 两个用户可编辑字段；服务端不存在的 code 才整体接纳（自定义标的）。
+      // 历史事故：前端 fetch 失败回退 localStorage 过期 universe（mock 价格+空 bars），
+      // 用户一次改持仓即把 20 只真实行情全量污染成 mock 值。
+      const serverByCode = new Map(instrumentsStore.map(i => [i.code, i]));
+      let preserved = 0;
+      const merged = instruments.map((p: any) => {
+        const s = serverByCode.get(p?.code);
+        if (!s) return p; // 自定义新标的：整体接纳
+        preserved++;
+        return {
+          ...s,
+          currentShares: typeof p?.currentShares === 'number' ? p.currentShares : s.currentShares,
+          riskBudgetWeight: typeof p?.riskBudgetWeight === 'number' ? p.riskBudgetWeight : s.riskBudgetWeight,
+        };
+      });
+      savePersistedStore(merged, 'ingest'); // 先原子落盘，失败则直接抛错不污染内存
+      instrumentsStore = merged;
+      res.json({
+        success: true,
+        count: merged.length,
+        preservedMarketData: preserved,
+        message: `数据接入成功（已持久化；${preserved} 只已存在标的的行情字段以服务端为权威，仅接受持仓/权重）`,
+      });
     } else {
       res.status(400).json({ success: false, message: 'Invalid payload: instruments array required' });
     }
@@ -183,6 +308,14 @@ app.post('/api/ashare/proxy', async (req, res) => {
 
 app.get('/api/health', (_req, res) => {
   const fallbackCount = instrumentsStore.filter((i: any) => i?.dataSource === 'fallback').length;
+  const barDates = instrumentsStore.flatMap((i: any) =>
+    Array.isArray(i.bars) && i.bars.length ? [i.bars[i.bars.length - 1].tradeDate] : [],
+  );
+  barDates.sort();
+  const latestBar = barDates.length ? barDates[barDates.length - 1] : '';
+  const stalenessDays = latestBar
+    ? Math.floor((Date.now() - new Date(latestBar + 'T00:00:00+08:00').getTime()) / 86400000)
+    : null;
   res.json({
     status: 'online',
     system: 'Carver A-Share Quantitative System',
@@ -191,6 +324,8 @@ app.get('/api/health', (_req, res) => {
     realCount: instrumentsStore.length - fallbackCount,
     fallbackCount, // 无 parquet、回退合成模板的标的数（>0 表示部分行情并非真实）
     persisted: storePathExists(),
+    latestBarDate: latestBar,
+    stalenessDays, // parquet 最新 bar 距今天数（>3 提示重建）
   });
 });
 
@@ -228,10 +363,20 @@ async function initStore() {
   if (process.env.RESET_STORE !== 'true' && storePathExists()) {
     const persisted = loadPersistedStore();
     if (persisted && Array.isArray(persisted.instruments) && persisted.instruments.length) {
-      base = mergeStores(base, persisted.instruments, persisted.deletedCodes || []);
+      const deletedCodes: string[] = Array.isArray(persisted.deletedCodes) ? persisted.deletedCodes : [];
+      // 防御性警告：deletedCodes 与当前 catalog 有交集 = 过时删除记录正在屏蔽真实标的
+      // （历史事故：11 个个股 code 的旧删除码把 poorlab11 静默砍成 1 只，debug 成本极高）
+      const shadowed = deletedCodes.filter((c) => base.some((i: any) => i?.code === c));
+      if (shadowed.length) {
+        console.warn(
+          `[persistence] ⚠️ ${shadowed.length} 个 code 同时存在于 deletedCodes 与当前 catalog：` +
+            `${shadowed.join(', ')} —— 过时删除记录会屏蔽这些标的，请清理 data/store.json 的 deletedCodes`,
+        );
+      }
+      base = mergeStores(base, persisted.instruments, deletedCodes);
       console.log(
         `[persistence] merged ${persisted.instruments.length} persisted instruments (savedAt=${persisted.savedAt}` +
-          `${persisted.deletedCodes?.length ? `, deleted=${persisted.deletedCodes.length}` : ''})`,
+          `${deletedCodes.length ? `, deleted=${deletedCodes.length}` : ''})`,
       );
     }
   }
@@ -258,6 +403,38 @@ async function initStore() {
     console.warn('[fundamentals] enrich failed:', err?.message);
   }
 
+  // 市价口径兜底（启动即生效，不依赖腾讯）：parquet 的 currentPrice 是 hfq 后复权价，
+  // 直接用于定仓会按复权因子算错目标股数。以 realData 算出的 VWAP（amount/volume，
+  // 原始成交数据不经复权）覆盖；随后启动自动同步会用快照实时价再覆盖（更新）。
+  base = base.map((inst: any) =>
+    typeof inst.vwapPrice === 'number' && inst.vwapPrice > 0
+      ? { ...inst, currentPrice: inst.vwapPrice }
+      : inst,
+  );
+
+  // 数据新鲜度自检：parquet 最新 bar 距今天数（>3 天提示重建，防止看着陈旧 K 线做决策）
+  try {
+    const allDates: string[] = base.flatMap((i: any) =>
+      Array.isArray(i.bars) && i.bars.length ? [i.bars[i.bars.length - 1].tradeDate] : [],
+    );
+    if (allDates.length) {
+      allDates.sort();
+      const latest = allDates[allDates.length - 1];
+      const ageDays = Math.floor(
+        (Date.now() - new Date(latest + 'T00:00:00+08:00').getTime()) / 86400000,
+      );
+      if (ageDays > 3) {
+        console.warn(
+          `[data-freshness] ⚠️ parquet 最新 bar ${latest}（${ageDays} 天前），数据陈旧，建议重建 parquet（AKShare hfq 增量更新）`,
+        );
+      } else {
+        console.log(`[data-freshness] latest bar ${latest}（${ageDays} 天前）`);
+      }
+    }
+  } catch (err: any) {
+    console.warn('[data-freshness] check failed:', err?.message);
+  }
+
   instrumentsStore = base;
 }
 
@@ -281,6 +458,31 @@ async function startServer() {
   app.listen(port, '0.0.0.0', () => {
     console.log(`Carver A-Share Portfolio Server listening on http://0.0.0.0:${port}`);
   });
+
+  // 启动后自动同步一次实时快照（市价 + 估值双通道互验）：
+  // parquet 底座的 currentPrice 是后复权收盘价（hfq），不刷新则定仓公式
+  // 「目标股数 = 目标市值 ÷ 价格」按 hfq 价计算、错一个复权因子——601857 实测差 1.86 倍，
+  // 福耀玻璃 hfq 5248 更会被单标的 cap（25%）直接截到 0 股。
+  // 同步已重构为纯快照路径（不拉日线、不碰 bars），秒级完成；失败仅告警不阻塞。
+  // 禁用：AUTO_SYNC_ON_START=false
+  if (process.env.AUTO_SYNC_ON_START !== 'false') {
+    (async () => {
+      try {
+        const { updatedInstruments, report } = await syncAllInstruments(instrumentsStore);
+        instrumentsStore = updatedInstruments;
+        console.log(
+          `[auto-sync] snapshot synced: updated=${report.updatedCount}/${report.totalInstruments}` +
+            ` latestTradingDate=${report.latestTradingDate || 'n/a'}` +
+            ` valuationSnapshots=${report.valuationSnapshotsAppended ?? 0}`,
+        );
+      } catch (err: any) {
+        console.warn(
+          '[auto-sync] failed (非致命：价格保持 parquet hfq 口径，可手动触发同步刷新):',
+          err?.message,
+        );
+      }
+    })();
+  }
 }
 
 startServer();

@@ -1,5 +1,6 @@
-import React, { useState, useMemo } from 'react';
-import { PositionCalculation, CarverSettings } from '../types/ashare';
+import React, { useState, useMemo, useEffect } from 'react';
+import { PositionCalculation, CarverSettings, AShareBar } from '../types/ashare';
+import { AShareDataService } from '../services/apiClient';
 import { 
   ResponsiveContainer, 
   PieChart, 
@@ -64,6 +65,41 @@ export const PortfolioRiskContributionChart: React.FC<PortfolioRiskContributionC
   const [activeSegmentIndex, setActiveSegmentIndex] = useState<number | null>(null);
   const [isModalOpen, setIsModalOpen] = useState<boolean>(false);
 
+  // 按需加载全量 K 线：/api/ashare/instruments 已 strip bars（响应 17MB → 200KB），
+  // 净值曲线/热力图需要的 bars 经 /api/ashare/bars/:code 按需拉取，本地缓存。
+  const [barsMap, setBarsMap] = useState<Map<string, AShareBar[]>>(new Map());
+  const neededCodes = useMemo(() => {
+    const codes = new Set<string>();
+    (Array.isArray(positions) ? positions : []).forEach((p) => {
+      if (p?.instrument?.code) codes.add(p.instrument.code);
+    });
+    return [...codes];
+  }, [positions]);
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      for (const code of neededCodes) {
+        if (cancelled) return;
+        try {
+          const bars = await AShareDataService.fetchInstrumentBars(code);
+          if (!cancelled && bars.length > 0) {
+            setBarsMap((prev) => {
+              if (prev.has(code)) return prev;
+              const next = new Map(prev);
+              next.set(code, bars);
+              return next;
+            });
+          }
+        } catch {
+          /* 单只失败不阻塞其余 */
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [neededCodes.join(',')]);
+
   // 1. Static & Standalone Risk contribution per instrument
   const chartData = useMemo(() => {
     const validPositions = Array.isArray(positions) 
@@ -115,8 +151,9 @@ export const PortfolioRiskContributionChart: React.FC<PortfolioRiskContributionC
 
   // 2. Compute 60-Day Historical Cumulative NAV Curve & Benchmark
   const historicalNAVData = useMemo(() => {
+    const barsOf = (p: any): AShareBar[] => barsMap.get(p.instrument.code) || p.instrument.bars || [];
     const validPositions = Array.isArray(positions)
-      ? positions.filter(p => p && p.instrument && p.instrument.bars && p.instrument.bars.length > 30)
+      ? positions.filter(p => p && p.instrument && barsOf(p).length > 30)
       : [];
 
     if (validPositions.length === 0) return [];
@@ -125,7 +162,7 @@ export const PortfolioRiskContributionChart: React.FC<PortfolioRiskContributionC
     const weights = validPositions.map(p => ({
       inst: p.instrument,
       weight: totalEquity > 0 ? (p.currentShares * p.instrument.currentPrice) / totalEquity : (1 / validPositions.length),
-      bars: p.instrument.bars || []
+      bars: barsOf(p)
     }));
 
     // Find common length, taking last 60 bars

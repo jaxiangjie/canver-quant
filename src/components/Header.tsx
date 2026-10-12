@@ -9,12 +9,13 @@ import {
   BellRing,
   Activity,
   Radar,
-  BookOpen
+  BookOpen,
+  Scale
 } from 'lucide-react';
 
 interface HeaderProps {
-  activeTab: 'sizer' | 'analytics' | 'strategy' | 'execution' | 'backtest' | 'adapter' | 'docs';
-  onTabChange: (tab: 'sizer' | 'analytics' | 'strategy' | 'execution' | 'backtest' | 'adapter' | 'docs') => void;
+  activeTab: 'sizer' | 'analytics' | 'strategy' | 'execution' | 'backtest' | 'adapter' | 'portfolio' | 'docs';
+  onTabChange: (tab: 'sizer' | 'analytics' | 'strategy' | 'execution' | 'backtest' | 'adapter' | 'portfolio' | 'docs') => void;
   pendingTradeCount: number;
   hasBufferBreach: boolean;
   breachedNames?: string[];
@@ -128,6 +129,16 @@ export const Header: React.FC<HeaderProps> = ({
         >
           <Database className="w-3.5 h-3.5" />
           <span>A股数据接口与纪律</span>
+        </button>
+
+        <button
+          onClick={() => onTabChange('portfolio')}
+          className={`flex items-center gap-1.5 whitespace-nowrap transition-colors py-1 ${
+            activeTab === 'portfolio' ? 'text-white border-b-2 border-emerald-500 font-semibold' : 'hover:text-slate-200'
+          }`}
+        >
+          <Scale className="w-3.5 h-3.5 text-emerald-400" />
+          <span>实盘持仓诊断(A/B)</span>
         </button>
 
         <button

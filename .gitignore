@@ -7,7 +7,12 @@ data/*
 !data/parquet/
 !data/parquet/daily/
 !data/parquet/daily/*.parquet
+# 估值快照库与历史回补数据同样随仓库提交（clone 即可算分位，无需重新抓取）
+!data/valuation/
+!data/valuation/*.jsonl
 .DS_Store
 *.log
 .env*
 !.env.example
+# 本地验收/诊断脚本与截图（CDP 验收工具产物）
+logs/

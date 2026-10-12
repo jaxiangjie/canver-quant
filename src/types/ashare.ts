@@ -41,6 +41,7 @@ export interface AShareInstrument {
   dailyATR: number;     // 20日ATR (绝对价格波幅)
   annualizedVol: number;// 20日年化波动率 (例如 0.18 = 18%)
   dataSource?: 'parquet' | 'fallback' | 'manual' | 'realtime_synced'; // 数据来源：parquet 真实行情 / 无数据回退模板 / 用户自定义 / 实时增量同步
+  vwapPrice?: number;  // 市价近似：parquet amount/volume 的 VWAP（hfq close 含复权系数，不能直接当市价用于下单/定仓）
   syntheticBars?: boolean;  // bars 是否为合成的伪数据（无真实行情源）；回测与相关性计算应排除此类标的
   riskBudgetWeight: number; // 目标风险预算权重 (0 - 1)
   currentShares: number;// 当前实际持有股数 (手数为 currentShares / 100)
@@ -301,3 +302,32 @@ export interface InstrumentAnalyticsItem {
   recommendedShares: number;
   reasonForDifference: string;  // 实际仓位与目标仓位不同的具体原因分析
 }
+
+// ──────────────────────────────────────────────────────────────
+// 自定义模拟持仓组合模型 (用于实盘诊断与 A/B 双组合对比)
+export interface CustomPortfolioItem {
+  id: string;
+  code: string;               // 标的代码，如 513180.SH
+  name: string;               // 标的名称，如 恒生科技ETF
+  category: 'broad_etf' | 'sector_etf' | 'bond_etf' | 'commodity_etf' | 'qdii_etf' | 'stock_cn';
+  amount: number;             // 持仓金额 (元)
+  costPrice?: number;         // 成本价 (元，可选)
+  currentPrice?: number;      // 当前市价 (元)
+  profitAmount?: number;      // 浮动盈亏额 (元)
+  profitRate?: number;        // 浮动盈亏率 (%)
+  weight?: number;            // 占组合实际权重 (%)
+  annualizedVol?: number;     // 年化波动率
+  riskBudgetWeight?: number;  // 目标风险预算权重 (可选，默认等权)
+  notes?: string;             // 备注
+}
+
+export interface CustomPortfolio {
+  id: string;                 // 唯一ID
+  name: string;               // 组合名称
+  description?: string;
+  totalCapital: number;       // 组合总资产 (元)
+  isOfficial?: boolean;       // 是否为官方锁定的基准组合 (不可彻底删除，只可复制为自选副本)
+  items: CustomPortfolioItem[];
+  updatedAt: string;
+}
+

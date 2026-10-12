@@ -46,6 +46,24 @@ export function setClientValuationSeries(seriesMap: Map<string, ValuationPoint[]
   inMemoryValuationSeries = seriesMap;
 }
 
+
+/**
+ * 获取 Node 内置模块（ESM 安全）。
+ * package.json 为 type:module，tsx 下 .ts 走 ESM —— globalThis.require 为 undefined，
+ * 旧写法会静默返回 null 导致估值库整体失效。优先用 process.getBuiltinModule（Node 22.3+），
+ * 旧版退回 globalThis.require；浏览器环境返回 null。
+ */
+function getNodeModule(name: string): any {
+  try {
+    const g = process as any;
+    if (g && typeof g.getBuiltinModule === 'function') return g.getBuiltinModule(name);
+    if (typeof (globalThis as any).require === 'function') return (globalThis as any).require(name);
+  } catch {
+    /* 浏览器或异常环境 */
+  }
+  return null;
+}
+
 /**
  * 判断当前是否处于 Node.js 服务端/脚本环境
  */
@@ -70,8 +88,8 @@ export function appendValuationSnapshots(entries: ValuationSnapshot[]): number {
 
   try {
     // 动态同步引入，避免打包器把 node 内置模块打包进浏览器
-    const fs = (globalThis as any).require ? (globalThis as any).require('fs') : null;
-    const path = (globalThis as any).require ? (globalThis as any).require('path') : null;
+    const fs = getNodeModule('node:fs');
+    const path = getNodeModule('node:path');
     if (!fs || !path) return 0;
 
     const valuationDir = path.resolve(process.cwd(), 'data', 'valuation');
@@ -129,8 +147,8 @@ export function loadValuationSeries(): Map<string, ValuationPoint[]> {
   }
 
   try {
-    const fs = (globalThis as any).require ? (globalThis as any).require('fs') : null;
-    const path = (globalThis as any).require ? (globalThis as any).require('path') : null;
+    const fs = getNodeModule('node:fs');
+    const path = getNodeModule('node:path');
     if (!fs || !path) return inMemoryValuationSeries;
 
     const valuationDir = path.resolve(process.cwd(), 'data', 'valuation');

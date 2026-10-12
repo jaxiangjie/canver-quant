@@ -17,6 +17,7 @@ import { BacktestSandbox } from './components/BacktestSandbox';
 import { DataAdapterConsole } from './components/DataAdapterConsole';
 import { AddInstrumentModal } from './components/AddInstrumentModal';
 import { InstrumentDeepAnalysisPanel } from './components/InstrumentDeepAnalysisPanel';
+import { CustomPortfolioDiagnosticPanel } from './components/CustomPortfolioDiagnosticPanel';
 import { DocumentationCenter } from './components/DocumentationCenter';
 
 // 组合（bundle）层：把 catalog 按组合定义过滤+套权重，得到可切换的测试宇宙
@@ -70,7 +71,7 @@ function persistActiveId(id: string) {
 export default function App() {
   const [universe, setUniverse] = useState<AShareInstrument[]>([]);
   const [settings, setSettings] = useState<CarverSettings>(DEFAULT_CARVER_SETTINGS);
-  const [activeTab, setActiveTab] = useState<'sizer' | 'analytics' | 'strategy' | 'execution' | 'backtest' | 'adapter' | 'docs'>('sizer');
+  const [activeTab, setActiveTab] = useState<'sizer' | 'analytics' | 'strategy' | 'execution' | 'backtest' | 'adapter' | 'portfolio' | 'docs'>('sizer');
   const [isAddModalOpen, setIsAddModalOpen] = useState(false);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
@@ -338,6 +339,13 @@ export default function App() {
             latestTradeDate={latestTradeDate}
             onSyncLatest={handleSyncLatest}
             isSyncingLatest={isSyncingLatest}
+          />
+        )}
+
+        {activeTab === 'portfolio' && (
+          <CustomPortfolioDiagnosticPanel
+            universe={universe}
+            settings={settings}
           />
         )}
 

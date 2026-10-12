@@ -1,10 +1,23 @@
-import { AShareInstrument, ExternalDataAdapterConfig } from '../types/ashare';
+import { AShareInstrument, AShareBar, ExternalDataAdapterConfig } from '../types/ashare';
 import { INITIAL_INSTRUMENTS, generateHistoricalBars } from './mockData';
 import { generate3YearValuationHistory } from './ashareStrategies';
 import { syncAllInstruments, SyncReport } from './liveMarketSync';
 
 const LOCAL_STORAGE_KEY = 'carver_ashare_universe_v3';
 const DATA_CONFIG_KEY = 'carver_data_adapter_config_v1';
+
+function emptySyncReport(total: number): SyncReport {
+  return {
+    success: false,
+    timestamp: new Date().toISOString(),
+    latestTradingDate: '',
+    totalInstruments: total,
+    updatedCount: 0,
+    alreadyLatestCount: 0,
+    failedCount: total,
+    details: [],
+  };
+}
 
 export const DEFAULT_DATA_CONFIG: ExternalDataAdapterConfig = {
   useMock: true,
@@ -137,10 +150,18 @@ export class AShareDataService {
   static async saveInstruments(instruments: AShareInstrument[]): Promise<void> {
     localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(instruments));
     try {
+      // 瘦身上传：ingest 语义是「用户操作结果提交」，只传可编辑字段（服务端防御也只接受这两个字段）。
+      // 全量上传（含 bars，曾达 17MB）既浪费又给过期数据覆盖服务端留口子。
+      const payload = instruments.map((i) => ({
+        id: i.id,
+        code: i.code,
+        currentShares: i.currentShares,
+        riskBudgetWeight: i.riskBudgetWeight,
+      }));
       await fetch('/api/ashare/ingest', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ instruments }),
+        body: JSON.stringify({ instruments: payload }),
       });
     } catch {
       // offline / mock mode
@@ -260,14 +281,42 @@ export class AShareDataService {
         }
       }
     } catch (err) {
-      console.warn('[apiClient] server sync failed, attempting direct sync:', err);
+      // 诚实失败：不再回退「浏览器直连公共接口同步」。
+      // 该路径用可能过期的本地 universe 合并行情并 POST ingest 回写服务端，
+      // 是真实行情被 mock/qfq 数据污染的主动手（2026-10-12 事故）。
+      console.warn('[apiClient] server sync failed; keep current universe unchanged:', err);
+      const current = await this.loadInstruments();
+      return { report: emptySyncReport(current.length), instruments: current };
     }
 
-    // 回退到客户端直接直连公共接口同步
+    // 服务端返回异常（success=false）：同样保持现状，不降级直连
     const current = await this.loadInstruments();
-    const { updatedInstruments, report } = await syncAllInstruments(current);
-    const hydrated = updatedInstruments.map(hydrateInstrument);
-    await this.saveInstruments(hydrated);
-    return { report, instruments: hydrated };
+    return { report: emptySyncReport(current.length), instruments: current };
+  }
+
+  /**
+   * 按需拉取单只标的全量 K 线（/instruments 已 strip bars 瘦身，17MB → 200KB）
+   */
+  static async fetchInstrumentBars(code: string): Promise<AShareBar[]> {
+    const res = await fetch(`/api/ashare/bars/${encodeURIComponent(code)}`);
+    if (!res.ok) return [];
+    const data = await res.json();
+    return Array.isArray(data?.bars) ? data.bars : [];
+  }
+
+  /**
+   * 动态解析并补全任意 A 股 / ETF 标的信息（快捷输入支持：代码池优先 + 实时网络回退）
+   */
+  static async resolveSymbol(code: string): Promise<{ success: boolean; instrument?: AShareInstrument; message?: string }> {
+    try {
+      const res = await fetch(`/api/ashare/resolve-symbol/${encodeURIComponent(code)}`);
+      const data = await res.json();
+      if (res.ok && data.success && data.instrument) {
+        return { success: true, instrument: hydrateInstrument(data.instrument) };
+      }
+      return { success: false, message: data.message || '无法解析标的代码' };
+    } catch (err: any) {
+      return { success: false, message: err?.message || '网络请求失败' };
+    }
   }
 }

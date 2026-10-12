@@ -178,128 +178,11 @@ export async function fetchEastmoneyQuotes(codes: string[]): Promise<Map<string,
   return result;
 }
 
-export interface RawDailyBar {
-  tradeDate: string;
-  open: number;
-  close: number;
-  high: number;
-  low: number;
-  volume: number;
-}
 
-/**
- * 拉取标的近期真实前复权日线 (默认250日)
- */
-export async function fetchTencentDailyBars(symbol: string, count: number = 250): Promise<RawDailyBar[]> {
-  try {
-    const res = await fetch(`https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?param=${symbol},day,,,${count},qfq`, {
-      headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' },
-    });
-    const json = await res.json();
-    const sub = json?.data?.[symbol];
-    if (!sub) return [];
-    const rawList = sub.qfqday || sub.day;
-    if (!Array.isArray(rawList)) return [];
 
-    return rawList.map((item: any) => ({
-      tradeDate: String(item[0]),
-      open: parseFloat(item[1]),
-      close: parseFloat(item[2]),
-      high: parseFloat(item[3]),
-      low: parseFloat(item[4]),
-      volume: parseFloat(item[5]),
-    })).filter((b: RawDailyBar) => !isNaN(b.close) && b.tradeDate);
-  } catch (err) {
-    console.warn(`[liveMarketSync] fetchTencentDailyBars failed for ${symbol}:`, err);
-    return [];
-  }
-}
 
-function mean(a: number[]): number {
-  if (!a.length) return 0;
-  return a.reduce((x, y) => x + y, 0) / a.length;
-}
 
-function stdSample(a: number[]): number {
-  const n = a.length;
-  if (n < 2) return 0;
-  const m = mean(a);
-  const v = a.reduce((s, x) => s + (x - m) ** 2, 0) / (n - 1);
-  return Math.sqrt(v);
-}
 
-/**
- * 对日 K 线重新完整计算 O(1) 滚动均线、ATR 与波动率
- */
-export function recomputeIndicators(bars: AShareBar[]): {
-  bars: AShareBar[];
-  dailyATR: number;
-  annualizedVol: number;
-} {
-  const n = bars.length;
-  if (n === 0) return { bars, dailyATR: 0.05, annualizedVol: 0.18 };
-
-  const closes = bars.map(b => b.close);
-
-  // 1. 年化波动率: 最近 120 交易日样本收益率标准差 × √250
-  const retStart = Math.max(1, n - 121);
-  const rets: number[] = [];
-  for (let i = retStart; i < n; i++) {
-    if (closes[i - 1] > 0) {
-      rets.push((closes[i] - closes[i - 1]) / closes[i - 1]);
-    }
-  }
-  const annualizedVol = Number((stdSample(rets) * Math.sqrt(250)).toFixed(4)) || 0.18;
-
-  // 2. ATR(20): True Range = max(H-L, |H-昨收|, |L-昨收|)
-  const tr: number[] = [0];
-  for (let i = 1; i < n; i++) {
-    const pc = closes[i - 1];
-    tr.push(
-      Math.max(
-        bars[i].high - bars[i].low,
-        Math.abs(bars[i].high - pc),
-        Math.abs(bars[i].low - pc),
-      ),
-    );
-  }
-
-  const atr20: number[] = [];
-  for (let i = 0; i < n; i++) {
-    atr20.push(i >= 20 ? mean(tr.slice(i - 19, i + 1)) : 0);
-  }
-
-  // 3. 滚动均线 (前缀和 O(1))
-  const prefixCloseSum: number[] = [0];
-  for (let i = 0; i < n; i++) {
-    prefixCloseSum.push(prefixCloseSum[i] + closes[i]);
-  }
-  const rollingMA = (idx: number, window: number): number | undefined => {
-    if (idx < window - 1) return undefined;
-    const sum = prefixCloseSum[idx + 1] - prefixCloseSum[idx + 1 - window];
-    return Number((sum / window).toFixed(3));
-  };
-
-  const updatedBars: AShareBar[] = bars.map((b, i) => {
-    const pc = i > 0 ? bars[i - 1].close : b.open;
-    const chg = pc > 0 ? Number((((b.close - pc) / pc) * 100).toFixed(2)) : 0;
-    return {
-      ...b,
-      preClose: pc,
-      changePct: chg,
-      ma20: rollingMA(i, 20),
-      ma60: rollingMA(i, 60),
-      ma250: rollingMA(i, 250),
-      atr20: i >= 20 ? Number(atr20[i].toFixed(3)) : undefined,
-    };
-  });
-
-  const last = n - 1;
-  const currentPrice = closes[last];
-  const dailyATR = Number((atr20[last] || (currentPrice * annualizedVol) / 15.8).toFixed(4));
-
-  return { bars: updatedBars, dailyATR, annualizedVol };
-}
 
 /**
  * 同步单只标的：获取最新真实日线并与本地合并
@@ -309,121 +192,15 @@ export async function syncSingleInstrument(
   quoteSnapshot?: RawTencentQuote,
   ctx?: { emQuote?: EastmoneyQuote; indexQuote?: RawTencentQuote },
 ): Promise<{ instrument: AShareInstrument; detail: SyncDetail }> {
-  const symbol = codeToTencentSymbol(inst.code);
-  const rawBars = await fetchTencentDailyBars(symbol, 250);
-
+  // 架构决定（2026-10-12）：bars 以 parquet 后复权(hfq) 为权威，实时同步不碰 K 线。
+  // 腾讯日线为前复权(qfq) 体系，混入 hfq 底座会产生复权断裂假跳变——601857 后复权 21.94
+  // 被前复权 11.8 覆盖即产生 -46% 假收益，实测可把年化波动率撑大 2.4 倍、目标股数缩到四成。
+  // 故日线段整体移除；每日行情增量走 parquet 重建（AKShare hfq），不走实时覆盖。
   const prevPrice = inst.currentPrice;
   const prevBars = inst.bars || [];
   const prevDate = prevBars.length > 0 ? prevBars[prevBars.length - 1].tradeDate : '';
-
-  if (!rawBars.length) {
-    // 接口临时失败，保留原值
-    return {
-      instrument: inst,
-      detail: {
-        id: inst.id,
-        code: inst.code,
-        name: inst.name,
-        prevPrice,
-        newPrice: prevPrice,
-        prevDate,
-        newDate: prevDate,
-        addedBars: 0,
-        isUpdated: false,
-        dailyATR: inst.dailyATR,
-        annualizedVol: inst.annualizedVol,
-        peTTM: inst.peTTM,
-        pb: inst.pb,
-        error: '拉取行情日线失败',
-      },
-    };
-  }
-
-  // 转换为 AShareBar 结构
-  const fetchedBarsMap = new Map<string, RawDailyBar>();
-  for (const b of rawBars) {
-    fetchedBarsMap.set(b.tradeDate, b);
-  }
-
-  const isSynthetic = !!inst.syntheticBars || inst.dataSource === 'fallback';
-  let mergedBars: AShareBar[] = [];
-
-  if (isSynthetic || prevBars.length === 0) {
-    // 原数据为合成数据：直接以真实 250 日行情完全替代
-    mergedBars = rawBars.map((b, idx) => {
-      const pc = idx > 0 ? rawBars[idx - 1].close : b.open;
-      const amt = b.volume * b.close;
-      return {
-        tradeDate: b.tradeDate,
-        open: b.open,
-        close: b.close,
-        high: b.high,
-        low: b.low,
-        preClose: pc,
-        volume: b.volume,
-        amount: amt,
-        turnover: Number((amt / 10000).toFixed(0)),
-        changePct: pc > 0 ? Number((((b.close - pc) / pc) * 100).toFixed(2)) : 0,
-      };
-    });
-  } else {
-    // 原数据为真实 parquet 历史：保留历史底座，增量追加缺失的最新日期，并刷新重叠日期
-    const existingDateSet = new Set(prevBars.map(b => b.tradeDate));
-    mergedBars = [...prevBars];
-
-    // 更新已有但最新日的 bar
-    for (let i = 0; i < mergedBars.length; i++) {
-      const d = mergedBars[i].tradeDate;
-      if (fetchedBarsMap.has(d)) {
-        const live = fetchedBarsMap.get(d)!;
-        mergedBars[i] = {
-          ...mergedBars[i],
-          open: live.open,
-          close: live.close,
-          high: live.high,
-          low: live.low,
-          volume: live.volume,
-          amount: live.volume * live.close,
-          turnover: Number(((live.volume * live.close) / 10000).toFixed(0)),
-        };
-      }
-    }
-
-    // 追加大于已有最大日期的 bar
-    const sortedRaw = [...rawBars].sort((a, b) => a.tradeDate.localeCompare(b.tradeDate));
-    for (const b of sortedRaw) {
-      if (!existingDateSet.has(b.tradeDate) && b.tradeDate > prevDate) {
-        const lastBar = mergedBars[mergedBars.length - 1];
-        const pc = lastBar ? lastBar.close : b.open;
-        const amt = b.volume * b.close;
-        mergedBars.push({
-          tradeDate: b.tradeDate,
-          open: b.open,
-          close: b.close,
-          high: b.high,
-          low: b.low,
-          preClose: pc,
-          volume: b.volume,
-          amount: amt,
-          turnover: Number((amt / 10000).toFixed(0)),
-          changePct: pc > 0 ? Number((((b.close - pc) / pc) * 100).toFixed(2)) : 0,
-        });
-      }
-    }
-  }
-
-  // 排序
-  mergedBars.sort((a, b) => a.tradeDate.localeCompare(b.tradeDate));
-
-  // 重算全套技术指标与统计量
-  const { bars: finalBars, dailyATR, annualizedVol } = recomputeIndicators(mergedBars);
-
-  const lastBar = finalBars[finalBars.length - 1];
-  const newDate = lastBar ? lastBar.tradeDate : prevDate;
-  const newPrice = lastBar ? lastBar.close : prevPrice;
-  const preClose = finalBars.length > 1 ? finalBars[finalBars.length - 2].close : newPrice;
-  const changePct = preClose > 0 ? Number((((newPrice - preClose) / preClose) * 100).toFixed(2)) : 0;
-  const addedBars = Math.max(0, finalBars.length - prevBars.length);
+  // 行情日期以快照为准（腾讯 parts[30]）；快照缺失时回退本地最后 bar 日期
+  const quoteDate = quoteSnapshot?.tradeDate || '';
 
   // 估值刷新（双通道互验 + 宽基ETF指数映射，规则见 docs/DATA_SOURCE_VALIDATION_2026-10-11.md）
   let peTTM = quoteSnapshot?.peTTM ?? inst.peTTM ?? 0;
@@ -476,19 +253,44 @@ export async function syncSingleInstrument(
     valuationSource = 'index_mapped';
   }
 
+  // 复权口径一致性：parquet 底座为后复权(hfq)，腾讯日线为前复权(qfq)体系。
+  // 用 qfq 收盘覆盖 currentPrice/bars 会造成复权断裂（如 601857 后复权 21.94 → 前复权 11.8 的假跳变），
+  // 故实时同步只更新估值字段（pe/pb 为点数据，无复权问题）；
+  // 行情 K 线与现价以 parquet 为权威，每日更新走 parquet 重建（AKShare hfq），不走实时覆盖。
+  // 价格口径分离（2026-10-12 修正）：currentPrice/preClose/changePct 用腾讯实时快照的「市价」
+  // （下单/市值口径，与炒股软件一致）；bars 保持 parquet 后复权底座（收益率/波动率口径）不动。
+  // 此前两个极端都错过：用 qfq 日线收盘覆盖 price → 复权断裂（601857 21.94→11.8 假跳变）；
+  // 完全不覆盖 → price 停在 hfq 历史价（福耀显示 5248 而市价约 50，目标股数错几十倍）。
+  // 市价兜底链：腾讯快照实时价 → parquet VWAP（单源自洽，见 realData 计算）→ hfq close（最后手段）。
+  // 旧代码快照失败时 livePrice=0，currentPrice 停留在 hfq（目标股数错复权因子倍）。
+  const vwapFallback =
+    typeof (inst as any).vwapPrice === 'number' && (inst as any).vwapPrice > 0
+      ? (inst as any).vwapPrice
+      : 0;
+  const livePrice =
+    quoteSnapshot && quoteSnapshot.currentPrice > 0
+      ? quoteSnapshot.currentPrice
+      : vwapFallback;
+  const livePreClose = quoteSnapshot && quoteSnapshot.preClose > 0 ? quoteSnapshot.preClose : 0;
+  // dailyATR 由 hfq bars 算出（绝对值是后复权口径），按「市价 / hfq 最后收盘」比值
+  // 换算为市价口径后再展示（否则福耀 ATR=129 而市价 54.7，表格口径自相矛盾）。
+  const hfqLastClose = prevBars.length > 0 ? prevBars[prevBars.length - 1].close : 0;
+  const atrScale = livePrice > 0 && hfqLastClose > 0 ? livePrice / hfqLastClose : 1;
+  const displayATR =
+    atrScale !== 1 ? Number((inst.dailyATR * atrScale).toFixed(4)) : inst.dailyATR;
   const updatedInstrument: AShareInstrument = {
     ...inst,
-    currentPrice: newPrice,
-    preClose,
-    changePct,
-    dailyATR,
-    annualizedVol,
+    currentPrice: livePrice > 0 ? livePrice : inst.currentPrice,
+    preClose: livePreClose > 0 ? livePreClose : inst.preClose,
+    changePct:
+      livePrice > 0 && livePreClose > 0
+        ? Number((((livePrice - livePreClose) / livePreClose) * 100).toFixed(2))
+        : inst.changePct,
+    dailyATR: displayATR,
     peTTM,
     pb,
     valuationSource,
-    bars: finalBars,
     syntheticBars: false,
-    dataSource: 'realtime_synced',
   };
 
   return {
@@ -498,13 +300,16 @@ export async function syncSingleInstrument(
       code: inst.code,
       name: inst.name,
       prevPrice,
-      newPrice,
+      newPrice: livePrice > 0 ? livePrice : prevPrice,
       prevDate,
-      newDate,
-      addedBars,
-      isUpdated: newDate !== prevDate || newPrice !== prevPrice || isSynthetic,
-      dailyATR,
-      annualizedVol,
+      newDate: quoteDate || prevDate,
+      addedBars: 0,
+      isUpdated:
+        (livePrice > 0 && livePrice !== prevPrice) ||
+        peTTM !== (inst.peTTM ?? 0) ||
+        pb !== (inst.pb ?? 0),
+      dailyATR: displayATR,
+      annualizedVol: inst.annualizedVol,
       peTTM,
       pb,
       valuationSource,

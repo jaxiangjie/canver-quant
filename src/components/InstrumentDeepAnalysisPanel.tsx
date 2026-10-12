@@ -1,9 +1,11 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import { 
   AShareInstrument, 
+  AShareBar,
   CarverSettings, 
   PositionCalculation 
 } from '../types/ashare';
+import { AShareDataService } from '../services/apiClient';
 import { 
   computeUniverseAnalytics, 
   CHINA_10Y_BOND_YIELD 
@@ -57,6 +59,27 @@ export const InstrumentDeepAnalysisPanel: React.FC<InstrumentDeepAnalysisPanelPr
   // Live Scenario Simulation State for Selected Instrument
   const [simPEPercentile, setSimPEPercentile] = useState<number | null>(null);
   const [simVolPct, setSimVolPct] = useState<number | null>(null);
+
+  // 按需加载全量 K 线：/api/ashare/instruments 已 strip bars（响应 17MB -> 200KB），
+  // 价格趋势图所需 bars 经 /api/ashare/bars/:code 按需拉取；拉取前用 instrument.bars（可能为合成兜底）。
+  const [selectedBars, setSelectedBars] = useState<AShareBar[] | null>(null);
+  const selectedCode = useMemo(() => universe.find((i) => i.id === selectedId)?.code || '', [universe, selectedId]);
+  useEffect(() => {
+    let cancelled = false;
+    setSelectedBars(null);
+    if (!selectedCode) return;
+    (async () => {
+      try {
+        const bars = await AShareDataService.fetchInstrumentBars(selectedCode);
+        if (!cancelled) setSelectedBars(bars.length > 0 ? bars : []);
+      } catch {
+        if (!cancelled) setSelectedBars([]);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedCode]);
 
   // Compute rich analytics for all 8 universe instruments
   const analyticsList = useMemo(() => {
@@ -699,7 +722,7 @@ export const InstrumentDeepAnalysisPanel: React.FC<InstrumentDeepAnalysisPanelPr
           {/* 图表对比区: 价格趋势动量通道 + 5年估值分位演化 */}
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
             <InstrumentPriceTrendChart
-              bars={selectedItem.instrument.bars}
+              bars={selectedBars ?? selectedItem.instrument.bars}
               instrumentName={selectedItem.instrument.name}
               instrumentCode={selectedItem.instrument.code}
               currentPrice={selectedItem.instrument.currentPrice}

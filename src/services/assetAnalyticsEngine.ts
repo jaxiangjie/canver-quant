@@ -171,6 +171,7 @@ export function computeInstrumentAnalytics(
     targetWeight,
     action,
     recommendedShares,
+    withinBuffer,
     reasonForDifference,
     // 基本面深度健康度与价值陷阱诊断
     roe: profile.roe,
