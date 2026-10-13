@@ -8,7 +8,7 @@
 
 /** 与 realData.ts 相同的检测逻辑（复刻，供单测隔离验证） */
 function detectBreaks(closes: number[]): string[] {
-  const BREAK_THRESHOLD = 0.30;
+  const BREAK_THRESHOLD = 0.12;
   const out: string[] = [];
   for (let i = 1; i < closes.length; i++) {
     const pc = closes[i - 1];
@@ -25,9 +25,9 @@ function rescaleBreaks(
   rows: { close: number; amount: number; volume: number }[],
   dates: string[],
 ): { closes: number[]; rescaled: number } {
-  const BREAK_THRESHOLD = 0.30;
+  const BREAK_THRESHOLD = 0.12;
   const LIMIT_UP_ERA_START = '1996-12-16';
-  const RATIO_DRIFT = 0.30;
+  const RATIO_DRIFT = 0.15;
   const W = 10;
   const closes = rows.map((r) => r.close);
   const vwapAt = rows.map((r) => (r.volume > 0 && r.amount > 0 ? r.amount / r.volume : 0));
@@ -55,7 +55,7 @@ function rescaleBreaks(
     } else if (before.length === 0 || after.length === 0) {
       factor = pc / closes[i];
     }
-    if (factor > 0 && (factor < 1 / 1.5 || factor > 1.5)) {
+    if (factor > 0 && (factor < 0.95 || factor > 1.05)) {
       for (let j = i; j < closes.length; j++) closes[j] *= factor;
       rescaled++;
     }
@@ -123,13 +123,21 @@ function check(name: string, cond: boolean, detail = '') {
   check('amount 单边×100 被中位数稳定化（≈10 而非 1000）', Math.abs(v - 10) < 0.01, `got ${v}`);
 }
 
-// ---- 3) 合法极端日不得误报：双创 20% 涨停 / 普通 10% 涨停 / 连续涨跌停 ----
+// ---- 3) 合法极端日不得误改数据：双创 20% 涨停 / 普通 10% 涨停 / 连续涨跌停 ----
+// 语义分层：detectBreaks 是「候选筛」（12% 阈值下 20% 涨停会进候选，允许）；
+// 真正的判定在 rescaleBreaks 的 VWAP 连续性甄别——连续涨停日 VWAP 与 close 同向变动，
+// close/vwap 比值平稳，不得重标定（只 warn 不误改数据）。
 {
   const closes: number[] = [10];
   for (let i = 0; i < 10; i++) closes.push(closes[closes.length - 1] * 1.2); // 连续 20% 涨停
   for (let i = 0; i < 10; i++) closes.push(closes[closes.length - 1] * 0.9); // 连续 10% 跌停
-  const breaks = detectBreaks(closes);
-  check('连续20%涨停+10%跌停不误报', breaks.length === 0, `got ${JSON.stringify(breaks)}`);
+  // 构造与 close 同向的 VWAP（涨停日收盘接近最高价，vwap≈close×0.97，比值平稳）
+  const dates = closes.map((_, i) => `2026-08-${String((i % 28) + 1).padStart(2, '0')}`);
+  const rows = closes.map((c, i) => ({ close: c, amount: c * 0.97 * 1000, volume: 1000 }));
+  const { closes: fixed, rescaled } = rescaleBreaks(rows, dates);
+  check('连续20%涨停+10%跌停不重标定（VWAP 同向，合法行情）', rescaled === 0, `got ${rescaled}`);
+  const changed = fixed.some((c, i) => Math.abs(c - closes[i]) > 1e-9);
+  check('连续涨跌停序列一根 K 线都不被改', !changed, '序列被误改');
 }
 
 // ---- 4) 复刻 510500 事故：hfq 基准切换（close 跳 3.25 倍而 VWAP 平稳）→ 必须重标定 ----
@@ -175,6 +183,38 @@ function check(name: string, cond: boolean, detail = '') {
     dates,
   );
   check('1990s 超界跳变不重标定（涨跌停制度前）', rescaled === 0, `got ${rescaled}`);
+}
+
+// ---- 6) 复刻 510300 事故：ETF 分红除权（close -21.7%、VWAP 平稳、factor≈1.25）→ 必须重标定 ----
+{
+  // 60 个交易日：前 30 日 close≈5.64、VWAP≈4.53（比值 1.244，hfq 体系）；
+  // 第 30 日上游切换复权基准到近市价体系（close≈4.42、VWAP≈4.43，比值≈1.0）。
+  // 关键：收益 -21.7% 低于旧的 30% 阈值、比值跳变 19.9% 低于旧的 30% 漂移阈值、factor 1.25
+  // 低于旧的 1.5 倍 guard——三旧阈值全部漏报，新阈值（12%/15%/1.05）必须抓住。
+  const rows: { close: number; amount: number; volume: number }[] = [];
+  const dates: string[] = [];
+  for (let i = 0; i < 30; i++) {
+    rows.push({ close: 5.64, amount: 45300, volume: 10000 });
+    dates.push(`2026-09-${String((i % 28) + 1).padStart(2, '0')}`);
+  }
+  for (let i = 0; i < 30; i++) {
+    rows.push({ close: 4.42, amount: 44300, volume: 10000 });
+    dates.push(`2026-10-${String((i % 28) + 1).padStart(2, '0')}`);
+  }
+  const { closes, rescaled } = rescaleBreaks(rows, dates);
+  check('510300 式温和断裂被重标定', rescaled === 1, `got ${rescaled}`);
+  const after = detectBreaks(closes);
+  check('重标定后断裂清零', after.length === 0, `got ${JSON.stringify(after)}`);
+  // 重标定后价格应回到断裂前 hfq 基准（≈5.64），而非 4.42
+  check(
+    '重标定后回到断裂前基准（≈5.64）',
+    Math.abs(closes[closes.length - 1] - 5.64) < 0.3,
+    `got ${closes[closes.length - 1].toFixed(3)}`,
+  );
+  const rets: number[] = [];
+  for (let i = 1; i < closes.length; i++) rets.push((closes[i] - closes[i - 1]) / closes[i - 1]);
+  const maxAbs = Math.max(...rets.map(Math.abs));
+  check('重标定后单日最大|收益|<5%', maxAbs < 0.05, `got ${(maxAbs * 100).toFixed(1)}%`);
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);

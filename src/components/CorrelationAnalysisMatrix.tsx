@@ -393,7 +393,7 @@ export const CorrelationAnalysisMatrix: React.FC<CorrelationAnalysisMatrixProps>
                 Carver Ch.9
               </span>
             </div>
-            <span className="text-[10px] text-slate-500">IDM = 1 / √(1/N + (1-1/N)ρ)，衡量组合有效独立资产数</span>
+            <span className="text-[10px] text-slate-500">IDM = 1 / √(1/N + (1-1/N)ρ)（理论值；定仓执行时受 maxIDM 约束）</span>
           </div>
 
           <div className="p-4 bg-slate-950/70 border border-slate-800/80 rounded-lg flex flex-col gap-1">

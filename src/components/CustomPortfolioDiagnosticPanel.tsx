@@ -4,6 +4,7 @@ import {
   CustomPortfolio,
   CustomPortfolioItem,
   CarverSettings,
+  InstrumentBundle,
 } from '../types/ashare';
 import { AShareDataService } from '../services/apiClient';
 import {
@@ -11,6 +12,9 @@ import {
   saveAllPortfolios,
   calculateRiskParityAllocation,
   calculateCarverDynamicAllocation,
+  portfolioToBundle,
+  fetchServerPortfolios,
+  mergePortfolios,
   PORTFOLIO_SELECTED_SLOTS_KEY,
 } from '../services/customPortfolioStore';
 import {
@@ -35,16 +39,41 @@ import {
   Layers,
   Lock,
   Target,
+  Upload,
 } from 'lucide-react';
 
 interface Props {
   universe: AShareInstrument[];
   settings: CarverSettings;
+  /** 导入主页面：转换后的 bundle 由 App 以固定 imported 槽位覆盖（多次导入覆盖不新建） */
+  onImportToMain?: (bundle: InstrumentBundle) => void;
 }
 
-export const CustomPortfolioDiagnosticPanel: React.FC<Props> = ({ universe, settings }) => {
+export const CustomPortfolioDiagnosticPanel: React.FC<Props> = ({ universe, settings, onImportToMain }) => {
   // 全部自选与官方组合库
   const [portfolios, setPortfolios] = useState<CustomPortfolio[]>(() => loadAllPortfolios());
+
+  // 服务端组合库同步（data/portfolios/custom_portfolios.json 随 git 版本管理）：
+  // localStorage 先渲染，挂载后拉服务端按 updatedAt 新者胜合并；本地更新则保存时 POST 双写。
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const server = await fetchServerPortfolios();
+      if (cancelled || !server.length) return;
+      setPortfolios((prev) => {
+        const merged = mergePortfolios(prev, server);
+        const unchanged =
+          merged.length === prev.length &&
+          merged.every((m, i) => m.id === prev[i]?.id && m.updatedAt === prev[i]?.updatedAt);
+        if (unchanged) return prev;
+        saveAllPortfolios(merged);
+        return merged;
+      });
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   // 双槽位当前选中的组合 ID (Slot A & Slot B)
   const [slotAId, setSlotAId] = useState<string>(() => {
@@ -82,8 +111,19 @@ export const CustomPortfolioDiagnosticPanel: React.FC<Props> = ({ universe, sett
     }
   }, [slotAId, slotBId]);
 
-  // 持久化整个组合库
+  // 持久化整个组合库（带防抖语义）：
+  // ⚠️ 首次挂载不得写盘——saveAllPortfolios 会 POST 让服务端写 data/portfolios/*.json，
+  // 而 Vite watcher 监视项目内文件，写入即触发 full-reload → 点击本 tab 立刻被弹回主页（2026-10-13 事故）。
+  // 故首次挂载只记录基线，之后内容有实际变化才保存。
+  const lastSavedPortfoliosRef = React.useRef<string>('');
   useEffect(() => {
+    const serialized = JSON.stringify(portfolios);
+    if (lastSavedPortfoliosRef.current === '') {
+      lastSavedPortfoliosRef.current = serialized; // 首次挂载：仅记录基线
+      return;
+    }
+    if (serialized === lastSavedPortfoliosRef.current) return; // 内容未变：不写
+    lastSavedPortfoliosRef.current = serialized;
     saveAllPortfolios(portfolios);
   }, [portfolios]);
 
@@ -273,15 +313,169 @@ export const CustomPortfolioDiagnosticPanel: React.FC<Props> = ({ universe, sett
       return;
     }
     const allocationMap = calculateRiskParityAllocation(target.items, target.totalCapital);
-    const updatedItems = target.items.map((it) => ({
-      ...it,
-      amount: allocationMap.get(it.code) ?? it.amount,
-      notes: (it.notes ? it.notes + '；' : '') + '静态波动率反比满仓配平',
-    }));
+    let total = 0;
+    let cashCleared = 0;
+    const updatedItems = target.items.map((it) => {
+      const amt = allocationMap.get(it.id) ?? it.amount;
+      if (it.code === 'CASH' && amt === 0) cashCleared++;
+      total += amt;
+      const suffix =
+        it.code === 'CASH' && amt === 0
+          ? '静态满仓配平：现金占位已清零（不留现金语义）'
+          : '静态波动率反比满仓配平';
+      return {
+        ...it,
+        amount: amt,
+        notes: (it.notes ? it.notes + '；' : '') + suffix,
+      };
+    });
 
     setPortfolios((prev) =>
       prev.map((p) => (p.id === targetId ? { ...p, items: updatedItems, updatedAt: new Date().toISOString() } : p))
     );
+
+    // 配平结果透明化：明确告知总额是否精确满仓，避免「看起来没满仓」的困惑
+    const ratio = target.totalCapital > 0 ? ((total / target.totalCapital) * 100).toFixed(1) : '0';
+    const cashNote = cashCleared > 0 ? '；CASH 占位已清零（满仓配平不留现金）' : '';
+    alert(
+      `静态波动率反比配平完成：
+合计配置 ¥${total.toLocaleString()}（${ratio}%，精确满仓）
+` +
+        `各标的权重正比于 1/波动率（vol 下限 5%），残差已归入最大权重项${cashNote}`
+    );
+  };
+
+  // 导入主页面：组合 -> bundle（固定 imported 槽位覆盖）。含无数据标的的组合被阻止。
+  const handleImportToMain = (portfolioId: string) => {
+    const target = portfolios.find((p) => p.id === portfolioId);
+    if (!target || !target.items.length) {
+      alert('该组合中暂无标的，请先添加标的。');
+      return;
+    }
+    const result = portfolioToBundle(target, universe);
+    if (!result.ok || !result.bundle) {
+      alert(
+        '无法导入：组合含无数据标的（主页面引擎需要真实 parquet 行情计算波动率与信号）：\n' +
+          result.missing.join('\n') +
+          '\n\n请移除这些标的、或以官方池标的替代后再导入。'
+      );
+      return;
+    }
+    if (onImportToMain) {
+      onImportToMain(result.bundle);
+      alert(
+        '已导入主页面（外部导入槽位，覆盖式更新）：\n「' +
+          result.bundle.name +
+          '」\n\n' +
+          result.bundle.items.length +
+          ' 条腿 · 请切到「波动率定仓工作台」查看理想仓位与目标股数。\n再次导入其他组合时会覆盖本槽位。'
+      );
+    } else {
+      alert('主页面导入回调不可用。');
+    }
+  };
+
+  // 「拉取缺失数据并入池」：对组合中的池外标的（无 parquet 数据）自动拉取
+  // 腾讯 hfq 全历史到缓存区（data/cache/staging，gitignore），展示质量报告，
+  // 用户确认后晋升入统一池（parquet + pool_registry.json）——晋升后需刷新页面
+  // 让 catalog 扩展生效，再重新点击「导入主页面」。
+  const [stagingBusy, setStagingBusy] = React.useState(false);
+  const handleFetchAndPromote = async (portfolioId: string) => {
+    if (stagingBusy) return;
+    const target = portfolios.find((p) => p.id === portfolioId);
+    if (!target || !target.items.length) return;
+    // 复用导入判定拿到 missing 清单（catalog = universe prop，即完整官方池）
+    const result = portfolioToBundle(target, universe);
+    if (result.ok || !result.bundle) {
+      alert('该组合没有需要拉取的池外标的（全部标的数据可用），可直接点击「导入主页面」。');
+      return;
+    }
+    const codes = result.missing
+      .map((m) => {
+        const code = m.split(' ')[0];
+        return code === 'CASH（现金占位，无行情数据）' ? 'CASH' : code;
+      })
+      .filter((c) => c !== 'CASH' && /^\d{6}$/.test(c));
+    const invalid = result.missing.filter((m) => !/^\d{6}/.test(m.split(' ')[0]));
+    if (!codes.length) {
+      alert(
+        '缺失项均无法自动拉取：\n' +
+          result.missing.join('\n') +
+          '\n\n（仅支持 6 位 A 股/ETF 代码自动拉取；CASH 占位请移除）'
+      );
+      return;
+    }
+    setStagingBusy(true);
+    try {
+      // 逐个拉取到缓存区
+      const reports: any[] = [];
+      for (const code of codes) {
+        try {
+          const res = await fetch('/api/ashare/staging/fetch', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ code, target: 'staging' }),
+          });
+          const j = await res.json();
+          if (j.success) reports.push(j.report);
+          else reports.push({ code, name: code, error: j.message || '拉取失败' });
+        } catch (e: any) {
+          reports.push({ code, name: code, error: e?.message || '网络错误' });
+        }
+      }
+      const okReports = reports.filter((r) => !r.error);
+      const failed = reports.filter((r) => r.error);
+      const summary = okReports
+        .map(
+          (r) =>
+            `${r.code} ${r.name}：${r.barCount} 根（${r.firstDate} ~ ${r.lastDate}，${r.coverageYears} 年）` +
+            `· 年化波动 ${(r.annualizedVol * 100).toFixed(1)}%` +
+            `· 市价 ¥${r.marketPrice}` +
+            (r.rescaledCount ? ` · 已重标定 ${r.rescaledCount} 处断裂` : '') +
+            (r.warnings.length ? ` · ⚠️ ${r.warnings.join('；')}` : ''),
+        )
+        .join('\n');
+      if (!okReports.length) {
+        alert('全部拉取失败：\n' + failed.map((f) => `${f.code}: ${f.error}`).join('\n'));
+        return;
+      }
+      const proceed = window.confirm(
+        `已拉取 ${okReports.length}/${reports.length} 只到缓存区（质量报告）：\n\n${summary}\n` +
+          (failed.length ? `\n失败：${failed.map((f) => f.code).join(', ')}\n` : '') +
+          `\n确认将以上 ${okReports.length} 只晋升入统一池？\n` +
+          `（入池后这些标的的数据源固定为腾讯 hfq，之后请刷新页面再点「导入主页面」）`
+      );
+      if (!proceed) {
+        alert('已保留在缓存区（data/cache/staging），可稍后在服务端确认晋升。');
+        return;
+      }
+      // 逐个晋升
+      const promoted: string[] = [];
+      const promoteFailed: string[] = [];
+      for (const r of okReports) {
+        try {
+          const res = await fetch('/api/ashare/staging/promote', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ code: r.code }),
+          });
+          const j = await res.json();
+          if (j.success) promoted.push(`${r.code} ${r.name}`);
+          else promoteFailed.push(`${r.code}: ${j.message}`);
+        } catch (e: any) {
+          promoteFailed.push(`${r.code}: ${e?.message || '网络错误'}`);
+        }
+      }
+      alert(
+        (promoted.length
+          ? `✅ 已入池 ${promoted.length} 只：${promoted.join('、')}\n（统一池 parquet + pool_registry.json，随 git 版本管理）\n\n`
+          : '') +
+          (promoteFailed.length ? `❌ 晋升失败：\n${promoteFailed.join('\n')}\n\n` : '') +
+          `下一步：刷新页面（F5）让 catalog 扩展生效，然后重新点击「导入主页面」。`
+      );
+    } finally {
+      setStagingBusy(false);
+    }
   };
 
   // 快捷添加标的
@@ -900,6 +1094,22 @@ export const CustomPortfolioDiagnosticPanel: React.FC<Props> = ({ universe, sett
 
             <div className="flex items-center gap-1.5">
               <button
+                onClick={() => handleImportToMain(portfolioA.id)}
+                className="flex items-center gap-1 text-[10px] text-indigo-300 hover:text-indigo-200 px-1.5 py-1 rounded bg-indigo-950/60 hover:bg-indigo-900 border border-indigo-900 transition-colors"
+                title="导入主页面：作为「外部导入组合」覆盖式进入定仓工作台（理想仓位，现持仓=0）。含无数据标的（池外/CASH）的组合会被阻止"
+              >
+                <Upload className="w-3 h-3" />
+                <span>导入主页面</span>
+              </button>
+              <button
+                onClick={() => handleFetchAndPromote(portfolioA.id)}
+                disabled={stagingBusy}
+                className="flex items-center gap-1 text-[10px] text-amber-300 hover:text-amber-200 px-1.5 py-1 rounded bg-amber-950/60 hover:bg-amber-900 border border-amber-900 transition-colors disabled:opacity-50"
+                title="拉取缺失数据并入池：组合含池外标的（无 parquet 行情）时，自动拉取其全历史到缓存区并展示质量报告，确认后晋升入统一池（此后可导入主页面）"
+              >
+                <span>{stagingBusy ? '拉取中…' : '拉取缺失数据'}</span>
+              </button>
+              <button
                 onClick={() => handleCarverDynamicStrategy(portfolioA.id)}
                 className="flex items-center gap-1 text-[11px] font-semibold px-2.5 py-1 rounded bg-emerald-600 hover:bg-emerald-500 text-white shadow-sm transition-colors"
                 title="🎯 真正的 Carver 系统化策略定仓：综合动量标量、年线均线、估值守门与硬风控上限，合理定仓并保留现金备付"
@@ -989,6 +1199,22 @@ export const CustomPortfolioDiagnosticPanel: React.FC<Props> = ({ universe, sett
             </div>
 
             <div className="flex items-center gap-1.5">
+              <button
+                onClick={() => handleImportToMain(portfolioB.id)}
+                className="flex items-center gap-1 text-[10px] text-indigo-300 hover:text-indigo-200 px-1.5 py-1 rounded bg-indigo-950/60 hover:bg-indigo-900 border border-indigo-900 transition-colors"
+                title="导入主页面：作为「外部导入组合」覆盖式进入定仓工作台（理想仓位，现持仓=0）。含无数据标的（池外/CASH）的组合会被阻止"
+              >
+                <Upload className="w-3 h-3" />
+                <span>导入主页面</span>
+              </button>
+              <button
+                onClick={() => handleFetchAndPromote(portfolioB.id)}
+                disabled={stagingBusy}
+                className="flex items-center gap-1 text-[10px] text-amber-300 hover:text-amber-200 px-1.5 py-1 rounded bg-amber-950/60 hover:bg-amber-900 border border-amber-900 transition-colors disabled:opacity-50"
+                title="拉取缺失数据并入池：组合含池外标的（无 parquet 行情）时，自动拉取其全历史到缓存区并展示质量报告，确认后晋升入统一池（此后可导入主页面）"
+              >
+                <span>{stagingBusy ? '拉取中…' : '拉取缺失数据'}</span>
+              </button>
               <button
                 onClick={() => handleCarverDynamicStrategy(portfolioB.id)}
                 className="flex items-center gap-1 text-[11px] font-semibold px-2.5 py-1 rounded bg-emerald-600 hover:bg-emerald-500 text-white shadow-sm transition-colors"

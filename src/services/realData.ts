@@ -1,8 +1,9 @@
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { AShareInstrument, AShareBar } from '../types/ashare';
-import { INITIAL_INSTRUMENTS } from './mockData';
+import { INITIAL_INSTRUMENTS } from './mockData';
+import { registryToTemplates, getHfqToMarketFactors } from './stagingData';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -76,7 +77,17 @@ async function readRows(code: string): Promise<RawRow[]> {
 export async function loadRealUniverse(): Promise<AShareInstrument[]> {
   const out: AShareInstrument[] = [];
   let fallbackCount = 0; // 无 parquet、回退合成模板的标的数（用于暴露真实数据覆盖率，避免谎报成功）
-  for (const tpl of INITIAL_INSTRUMENTS) {
+
+  // 统一池 registry（2026-10-13 三级数据架构）：staging 晋升的池外标的在此扩展 catalog。
+  // registry 条目同样走 parquet 底座路径（staging_to_parquet.py 产出的 schema 与底座一致）。
+  const registryTemplates = registryToTemplates(readPoolRegistryEntries());
+  const hfqToMarketFactor = getHfqToMarketFactors();
+  if (registryTemplates.length) {
+    console.log(`[real-data] registry: +${registryTemplates.length} 晋升标的扩展 catalog`);
+  }
+  const allTemplates = [...INITIAL_INSTRUMENTS, ...registryTemplates];
+
+  for (const tpl of allTemplates) {
     const code = stripSuffix(tpl.code);
     let rows: RawRow[] = [];
     try {
@@ -105,13 +116,17 @@ export async function loadRealUniverse(): Promise<AShareInstrument[]> {
     // 背景：上游 parquet 数据湖 2026-09-01 曾重建复权基准——510500 close 2.42→7.88（+225%）、
     // 513100 11.37→2.23（-80%），而当日 VWAP（amount/volume，不经复权）平稳（7.88→7.91）。
     // 假跳变使年化波动率虚高至 325%/118%，目标股数被压到正确的 1/14。
-    // 甄别：A股 1996-12-16 起有涨跌停（10%，双创 20%），单日 |收益|>30% 超界即疑似断裂
-    // （1990s 无涨跌停，如 1994-08 热钱行情、1995-05-18 事件，跳过以防误报）；
-    // 再用 VWAP 连续性判定——断裂前后 close/vwap 比值整体跳变（>30% 偏离）= 复权基准
-    // 被切换而非真实行情，把断裂日及之后的 OHLC 按 factor 缩回断裂前基准。
-    const BREAK_THRESHOLD = 0.30;
+    // 甄别：A股 1996-12-16 起有涨跌停（10%，双创 20%）。ETF 分红除权/上游切换复权基准
+    // 会在序列上留下超界单日跳变——真实行情受涨跌停约束 |收益| 一般 ≤10%，
+    // 故阈值取 12%（抓 510300 在 2026-09-28 的 -21.7% 分红除权断裂；误入者再由 VWAP 甄别放行）；
+    // 1990s 无涨跌停（1994-08 热钱行情、1995-05-18 事件）跳过以防误报。
+    // VWAP 连续性判定：断裂前后 close/vwap 比值整体跳变（>15% 偏离）= 复权基准被切换
+    // 而非真实行情，把断裂日及之后的 OHLC 按 factor 缩回断裂前基准。
+    // （510300 案例：close/vwap 从 1.244 跳到 0.996，跳变 19.9%，VWAP 本身平稳——
+    //  市价没动、是复权体系被换，单日 -21.7% 在 10% 跌停制度下不可能是真实行情。）
+    const BREAK_THRESHOLD = 0.12;
     const LIMIT_UP_ERA_START = '1996-12-16';
-    const RATIO_DRIFT = 0.30;
+    const RATIO_DRIFT = 0.15;
     const RATIO_WINDOW = 10;
     const vwapAt: number[] = [];
     for (let i = 0; i < n; i++) {
@@ -148,7 +163,9 @@ export async function loadRealUniverse(): Promise<AShareInstrument[]> {
       } else if (before.length === 0 || after.length === 0) {
         factor = pc / closes[i]; // VWAP 缺失兜底：假设断裂当日真实收益约 0
       }
-      if (factor > 0 && (factor < 1 / 1.5 || factor > 1.5)) {
+      // guard：仅排除 |factor-1|<5% 的噪声（前后窗口中位数已平滑单日 VWAP 偏离）。
+      // 注意不能沿用 1.5 倍大阈——510300 分红除权断裂 factor≈1.25 正是要修的对象。
+      if (factor > 0 && (factor < 0.95 || factor > 1.05)) {
         // 重标定：断裂日及之后 OHLC 同步缩放（volume/amount 为原始成交数据，不动）；
         // closes 同步更新，后续 vol/ATR/均线全部基于修复后的连续序列计算。
         for (let j = i; j < n; j++) {
@@ -271,14 +288,19 @@ export async function loadRealUniverse(): Promise<AShareInstrument[]> {
       };
     });
 
+    // registry 标的（腾讯 hfq 源）：用 factor 把 hfq 绝对值换算回市价口径。
+    // currentPrice/preClose/vwapPrice/dailyATR 都是「市价口径」展示与定仓输入；
+    // bars 保持 hfq（收益率/波动率口径），factor 只影响绝对值不影响收益率。
+    const factor = hfqToMarketFactor.get(code) ?? 1;
+    const marketOr = (v: number) => (factor !== 1 && v > 0 ? Number((v * factor).toFixed(4)) : v);
     out.push({
       ...tpl,
-      currentPrice,
-      preClose,
+      currentPrice: marketOr(currentPrice),
+      preClose: marketOr(preClose),
       changePct,
-      dailyATR,
+      dailyATR: marketOr(dailyATR),
       annualizedVol,
-      vwapPrice: vwapPrice > 0 ? vwapPrice : undefined,
+      vwapPrice: vwapPrice > 0 ? marketOr(vwapPrice) : undefined,
       bars,
       dataSource: 'parquet',
     });
@@ -289,4 +311,17 @@ export async function loadRealUniverse(): Promise<AShareInstrument[]> {
     );
   }
   return out;
+}
+
+/** 读统一池 registry 原始条目（data/pool_registry.json，staging 晋升时写入）；损坏/缺失返回空 */
+function readPoolRegistryEntries(): Parameters<typeof registryToTemplates>[0] {
+  const regPath = path.resolve(process.cwd(), 'data', 'pool_registry.json');
+  if (!existsSync(regPath)) return [];
+  try {
+    const data = JSON.parse(readFileSync(regPath, 'utf-8'));
+    return Array.isArray(data?.entries) ? data.entries : [];
+  } catch (e) {
+    console.warn('[real-data] pool_registry.json 读取失败:', (e as Error).message);
+    return [];
+  }
 }

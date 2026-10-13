@@ -1,4 +1,5 @@
 import express from 'express';
+import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 
@@ -22,7 +23,13 @@ import {
   mergeStores,
 } from './src/services/persistence';
 import { syncAllInstruments } from './src/services/liveMarketSync';
-import { enrichUniverseValuation, loadValuationSeries } from './src/services/valuationStore';
+import { enrichUniverseValuation, loadValuationSeries } from './src/services/valuationStore';
+import {
+  fetchToStaging,
+  listStaging,
+  promoteFromStaging,
+  type StagingTarget,
+} from './src/services/stagingData';
 
 // In-memory data store for A-Share instruments (real parquet data if available, else mock)
 let instrumentsStore: any[] = [];
@@ -53,6 +60,92 @@ app.get('/api/ashare/bars/:code', (req, res) => {
 });
 
 // 动态解析并补全任意 A 股 / ETF 标的信息（优先在已有池寻找，未找到则从实时接口获取最新行情）
+// ===== 自选组合库持久化（data/portfolios/custom_portfolios.json，随 git 提交做版本管理） =====
+// 只存用户自选组合（官方预设是前端代码常量）；写走 tmp+rename 原子落盘。
+const PORTFOLIOS_PATH = path.resolve(process.cwd(), 'data', 'portfolios', 'custom_portfolios.json');
+
+app.get('/api/ashare/portfolios', (_req, res) => {
+  try {
+    if (!fs.existsSync(PORTFOLIOS_PATH)) {
+      res.json({ success: true, portfolios: [] });
+      return;
+    }
+    const raw = JSON.parse(fs.readFileSync(PORTFOLIOS_PATH, 'utf8'));
+    res.json({ success: true, portfolios: Array.isArray(raw?.portfolios) ? raw.portfolios : [] });
+  } catch (err: any) {
+    res.status(500).json({ success: false, message: err?.message || 'read failed' });
+  }
+});
+
+app.post('/api/ashare/portfolios', (req, res) => {
+  try {
+    const { portfolios } = req.body;
+    if (!Array.isArray(portfolios)) {
+      res.status(400).json({ success: false, message: 'portfolios array required' });
+      return;
+    }
+    fs.mkdirSync(path.dirname(PORTFOLIOS_PATH), { recursive: true });
+    const tmp = PORTFOLIOS_PATH + '.tmp';
+    fs.writeFileSync(tmp, JSON.stringify({ savedAt: new Date().toISOString(), portfolios }, null, 2), 'utf8');
+    fs.renameSync(tmp, PORTFOLIOS_PATH); // 原子替换
+    res.json({ success: true, count: portfolios.length });
+
+  } catch (err: any) {
+    res.status(500).json({ success: false, message: err?.message || 'write failed' });
+  }
+});
+
+// ===== staging 缓存区（三级数据架构 2026-10-13）=====
+// 拉取池外标的到缓存区（target=staging 待确认入池 / analysis 按需分析临时数据，均 gitignore）
+app.post('/api/ashare/staging/fetch', async (req, res) => {
+  try {
+    const { code, target } = req.body || {};
+    if (!code) {
+      res.status(400).json({ success: false, message: 'code required' });
+      return;
+    }
+    const tgt: StagingTarget = target === 'analysis' ? 'analysis' : 'staging';
+    const report = await fetchToStaging(String(code), tgt);
+    res.json({ success: true, report });
+  } catch (err: any) {
+    res.status(502).json({ success: false, message: err?.message || 'fetch failed' });
+  }
+});
+
+app.get('/api/ashare/staging', (_req, res) => {
+  try {
+    res.json({ success: true, items: listStaging('staging') });
+  } catch (err: any) {
+    res.status(500).json({ success: false, message: err?.message || 'list failed' });
+  }
+});
+
+// 确认入池：staging bars → 统一池 parquet + registry 登记 → 刷新内存 catalog
+app.post('/api/ashare/staging/promote', async (req, res) => {
+  try {
+    const { code, riskBudgetWeight, category, name } = req.body || {};
+    if (!code) {
+      res.status(400).json({ success: false, message: 'code required' });
+      return;
+    }
+    const entry = await promoteFromStaging(String(code), {
+      riskBudgetWeight: typeof riskBudgetWeight === 'number' ? riskBudgetWeight : undefined,
+      category: category ? String(category) : undefined,
+      name: name ? String(name) : undefined,
+    });
+    // 晋升后刷新 catalog（registry → loadRealUniverse）+ 估值富化，主页面全链路立即可用
+    const base = await loadRealUniverse();
+    const enr = enrichUniverseValuation(base);
+    instrumentsStore = enr.instruments;
+    console.log(
+      `[staging] promoted ${entry.code} ${entry.name} — catalog 现为 ${instrumentsStore.length} 只`,
+    );
+    res.json({ success: true, entry, catalogSize: instrumentsStore.length });
+  } catch (err: any) {
+    res.status(500).json({ success: false, message: err?.message || 'promote failed' });
+  }
+});
+
 app.get('/api/ashare/resolve-symbol/:code', async (req, res) => {
   try {
     const rawCode = String(req.params.code || '').trim().toUpperCase();
@@ -306,6 +399,43 @@ app.post('/api/ashare/proxy', async (req, res) => {
   }
 });
 
+// 数据湖自动巡检定时任务框架 (Data Sentinel Framework)
+// 目前仅预留框架结构与手动巡检接口，默认未开启自动调度器
+export interface DataSentinelReport {
+  lastCheckTime: string;
+  totalParquetFiles: number;
+  corruptedFiles: string[];
+  anomalousVolCount: number;
+  status: 'HEALTHY' | 'WARNING' | 'ERROR';
+}
+
+let lastSentinelReport: DataSentinelReport = {
+  lastCheckTime: new Date().toISOString(),
+  totalParquetFiles: 22,
+  corruptedFiles: [],
+  anomalousVolCount: 0,
+  status: 'HEALTHY',
+};
+
+export function runDataSentinelCheck(): DataSentinelReport {
+  const anomalies: string[] = [];
+  let anomalousVol = 0;
+  instrumentsStore.forEach((inst) => {
+    if (typeof inst.annualizedVol === 'number' && (inst.annualizedVol < 0.02 || inst.annualizedVol > 0.80)) {
+      anomalousVol++;
+    }
+  });
+
+  lastSentinelReport = {
+    lastCheckTime: new Date().toISOString(),
+    totalParquetFiles: instrumentsStore.length,
+    corruptedFiles: anomalies,
+    anomalousVolCount: anomalousVol,
+    status: anomalousVol > 0 ? 'WARNING' : 'HEALTHY',
+  };
+  return lastSentinelReport;
+}
+
 app.get('/api/health', (_req, res) => {
   const fallbackCount = instrumentsStore.filter((i: any) => i?.dataSource === 'fallback').length;
   const barDates = instrumentsStore.flatMap((i: any) =>
@@ -326,7 +456,18 @@ app.get('/api/health', (_req, res) => {
     persisted: storePathExists(),
     latestBarDate: latestBar,
     stalenessDays, // parquet 最新 bar 距今天数（>3 提示重建）
+    dataSentinel: {
+      frameworkEnabled: true,
+      schedulerActive: false, // 遵循用户要求：预留框架，暂不启动自动定时
+      lastReport: lastSentinelReport,
+    },
   });
+});
+
+// 手动触发巡检接口（支持预留框架按需调用）
+app.post('/api/ashare/sentinel/check', (_req, res) => {
+  const rep = runDataSentinelCheck();
+  res.json({ success: true, report: rep });
 });
 
 // 启动时加载顺序：llmquant 的本地 parquet 真实数据 -> 合并持久化覆盖(持仓/权重) -> 无则回退 mock

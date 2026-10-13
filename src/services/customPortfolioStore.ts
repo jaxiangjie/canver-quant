@@ -1,4 +1,4 @@
-import { AShareInstrument, CarverSettings, CustomPortfolio, CustomPortfolioItem } from '../types/ashare';
+import { AShareInstrument, CarverSettings, CustomPortfolio, CustomPortfolioItem, InstrumentBundle } from '../types/ashare';
 import { calculateInstrumentPosition, DEFAULT_CARVER_SETTINGS } from './carverEngine';
 
 export const PORTFOLIO_COLLECTION_STORAGE_KEY = 'carver_custom_portfolios_library_v2';
@@ -95,30 +95,190 @@ export function saveAllPortfolios(portfolios: CustomPortfolio[]): void {
   } catch {
     /* ignore */
   }
+  // 双写服务端（data/portfolios/custom_portfolios.json，随 git 提交实现版本管理）。
+  // 只持久化用户自选——官方预设是代码常量，loadAllPortfolios 会自动补齐。
+  // fire-and-forget：失败不阻塞本地保存（下次保存重试）。
+  try {
+    const userPortfolios = portfolios.filter(p => !p.isOfficial);
+    fetch('/api/ashare/portfolios', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ portfolios: userPortfolios }),
+    }).catch(() => {
+      /* offline / server down：本地已保存，静默降级 */
+    });
+  } catch {
+    /* ignore */
+  }
+}
+
+/** 主页面外部导入 bundle 的固定槽位 id（多次导入覆盖，不新建） */
+export const IMPORTED_BUNDLE_ID = 'imported';
+
+export interface PortfolioImportResult {
+  ok: boolean;
+  /** 无数据标的清单（含 CASH 占位）——阻止导入的依据 */
+  missing: string[];
+  bundle?: InstrumentBundle;
 }
 
 /**
- * 基于标的波动率，一键反比平准化自动计算各标的目标金额
+ * 自选组合 -> 主页面 InstrumentBundle 转换（诊断面板「导入主页面」用）。
+ *
+ * 规则（2026-10-13 与用户确认）：
+ * - 含任何无数据标的（不在官方 catalog 的池外标的 / CASH 占位）-> 阻止导入，
+ *   返回 missing 清单（诚实性：无数据不降级、不静默剔除改变组合语义）；
+ * - 权重：全部条目显式设置了 riskBudgetWeight 则归一化使用；否则按 amount 占比归一
+ *   （金额占比 ~= 风险贡献占比的合理近似）；
+ * - 现持仓不回填（选项 C）：导入的是「理想仓位结构」，主页面 currentShares=0，
+ *   只看目标仓位，由用户自行按比例调仓。
+ */
+export function portfolioToBundle(
+  portfolio: CustomPortfolio,
+  catalog: AShareInstrument[]
+): PortfolioImportResult {
+  const catalogKeys = new Set<string>();
+  catalog.forEach(c => {
+    catalogKeys.add(c.id);
+    catalogKeys.add(c.code);
+    catalogKeys.add(c.code.split('.')[0]);
+  });
+
+  const missing: string[] = [];
+  // CASH 是现金占位而非标的：剔除并折算为主页面「现金垫」（总额-已配=现金），
+  // 不阻止导入（2026-10-13 修正：此前 CASH 被归入缺失永久阻止，与组合含现金的正常语义矛盾）
+  let cashAmount = 0;
+  const valid = portfolio.items.filter(it => {
+    if (it.code === 'CASH') {
+      cashAmount += Math.max(0, it.amount);
+      return false;
+    }
+    const bare = it.code.split('.')[0];
+    if (!catalogKeys.has(it.code) && !catalogKeys.has(bare)) {
+      missing.push(it.code + ' ' + it.name);
+      return false;
+    }
+    return true;
+  });
+
+  if (!valid.length) {
+    return { ok: false, missing: missing.length ? missing : ['组合中没有可导入的标的'] };
+  }
+  if (missing.length > 0) {
+    return { ok: false, missing };
+  }
+
+  // 权重：全显式 -> 归一化显式值；否则按 amount 占比
+  const allExplicit = valid.every(it => typeof it.riskBudgetWeight === 'number' && it.riskBudgetWeight > 0);
+  let weights: number[];
+  if (allExplicit) {
+    const sum = valid.reduce((s, it) => s + (it.riskBudgetWeight || 0), 0);
+    weights = sum > 0 ? valid.map(it => (it.riskBudgetWeight || 0) / sum) : valid.map(() => 1 / valid.length);
+  } else {
+    const totalAmount = valid.reduce((s, it) => s + Math.max(0, it.amount), 0);
+    if (totalAmount <= 0) {
+      return { ok: false, missing: ['组合内全部标的金额为 0，无法推导权重'] };
+    }
+    weights = valid.map(it => Math.max(0, it.amount) / totalAmount);
+  }
+
+  const bundle: InstrumentBundle = {
+    id: IMPORTED_BUNDLE_ID,
+    name: '导入: ' + portfolio.name,
+    description:
+      '自选组合「' + portfolio.name + '」导入（' + new Date().toISOString().slice(0, 10) +
+      '）· 理想仓位结构，现持仓按 0 处理；多次导入覆盖本组合' +
+      (cashAmount > 0
+        ? '；组合内现金 ¥' + cashAmount.toLocaleString() + ' 未入池，对应主页面现金垫'
+        : ''),
+    items: valid.map((it, i) => ({
+      id: it.code.split('.')[0],
+      riskBudgetWeight: Number(weights[i].toFixed(4)),
+    })),
+  };
+  return { ok: true, missing: [], bundle };
+}
+
+/** 拉取服务端持久化的自选组合库（data/portfolios/custom_portfolios.json） */
+export async function fetchServerPortfolios(): Promise<CustomPortfolio[]> {
+  try {
+    const res = await fetch('/api/ashare/portfolios');
+    if (!res.ok) return [];
+    const data = await res.json();
+    return Array.isArray(data?.portfolios) ? data.portfolios : [];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * 合并本地与服务端组合库：按 id 去重，updatedAt 较新者胜（单用户场景的简单时钟策略）。
+ */
+export function mergePortfolios(local: CustomPortfolio[], server: CustomPortfolio[]): CustomPortfolio[] {
+  const byId = new Map<string, CustomPortfolio>();
+  const put = (p: CustomPortfolio) => {
+    const existing = byId.get(p.id);
+    if (!existing || String(p.updatedAt || '') > String(existing.updatedAt || '')) byId.set(p.id, p);
+  };
+  local.forEach(put);
+  server.forEach(put);
+  return [...byId.values()];
+}
+
+/**
+ * 基于标的波动率，一键反比平准化自动计算各标的目标金额（满仓配平）。
+ *
+ * 修复记录（2026-10-13，修复 Gemini 初版三处缺陷）：
+ * 1. CASH 现金占位项不得参与反比权重计算——其 vol=0.01 会让 invVol=100、
+ *    权重爆炸至 ~70%（实测 42 万组合 CASH 吃 29.4 万、权益仅剩 30%），
+ *    与「强行填满 100% 资金，不留现金」的按钮语义直接矛盾。现 CASH 一律清 0。
+ * 2. 残差回收：此前每项独立四舍五入到千元，N 项累加后总和偏离 totalCapital
+ *    （最多 ±500×N），并非精确满仓。现各项取整到百元、残差归 invVol 最大项。
+ * 3. 按 item.id 而非 code 作 Map key——此前重复添加同一标的时后写覆盖前写，
+ *    静默丢失一份资金分配。
  */
 export function calculateRiskParityAllocation(
-  items: Array<{ code: string; annualizedVol?: number }>,
+  items: Array<{ id: string; code: string; annualizedVol?: number }>,
   totalCapital: number
 ): Map<string, number> {
   const result = new Map<string, number>();
   if (!items.length || totalCapital <= 0) return result;
 
-  // 权重正比于 1 / Vol
-  const invVols = items.map(it => {
-    const vol = Math.max(0.01, it.annualizedVol ?? 0.25);
-    return { code: it.code, invVol: 1 / vol };
+  // 权重正比于 1 / Vol；CASH 现金占位不参与（清 0，语义=不留现金）。
+  // vol 下限 0.05（国债ETF 实测水平）：防未知 vol/超低波项权重爆炸。
+  const participable = items.filter(it => it.code !== 'CASH');
+  if (!participable.length) {
+    // 组合只有现金占位：无权益可配，全部置 0（调用方应提示用户先添加标的）
+    items.forEach(it => result.set(it.id, 0));
+    return result;
+  }
+
+  const invVols = participable.map(it => {
+    const vol = Math.max(0.05, it.annualizedVol ?? 0.25);
+    return { id: it.id, invVol: 1 / vol };
   });
 
   const sumInv = invVols.reduce((s, x) => s + x.invVol, 0);
-  if (sumInv <= 0) return result;
+  if (sumInv <= 0) {
+    items.forEach(it => result.set(it.id, 0));
+    return result;
+  }
 
+  // 各项按权重取整到百元；残差归 invVol 最大项，保证 sum === totalCapital 精确满仓
+  let allocated = 0;
+  let maxInvVolId = invVols[0].id;
   invVols.forEach(x => {
-    const targetAmt = Math.round((x.invVol / sumInv) * totalCapital / 1000) * 1000;
-    result.set(x.code, targetAmt);
+    if (x.invVol > (invVols.find(v => v.id === maxInvVolId)?.invVol ?? 0)) maxInvVolId = x.id;
+    const amt = Math.round((x.invVol / sumInv) * totalCapital / 100) * 100;
+    result.set(x.id, amt);
+    allocated += amt;
+  });
+  const residual = totalCapital - allocated;
+  result.set(maxInvVolId, (result.get(maxInvVolId) ?? 0) + residual);
+
+  // CASH 占位项显式清 0（非缺席，调用方 get(it.id) 一定命中）
+  items.forEach(it => {
+    if (it.code === 'CASH') result.set(it.id, 0);
   });
 
   return result;
@@ -216,14 +376,23 @@ export function calculateCarverDynamicAllocation(
     // 目标金额 = 目标股数 * 最新市价 (必须遵守向下整手 100 股)
     let targetAmt = Math.round((pos.targetShares * p) / 100) * 100;
 
-    // 单标的硬风控上限 (默认不超过 25%)
-    const maxCap = Math.round(portfolio.totalCapital * (settings.maxInstrumentRiskCap || 0.25));
+    // 单标的硬风控上限 (默认不超过 25%)——cap 的是持仓金额，应使用 PositionCap 字段
+    // （与 carverEngine 内部 cap 同源；RiskCap 是风险权重口径，两者语义不同）
+    const maxCap = Math.round(portfolio.totalCapital * (settings.maxInstrumentPositionCap ?? 0.25));
     if (targetAmt > maxCap) targetAmt = maxCap;
 
     totalAllocated += targetAmt;
 
-    let note = `标量 ${pos.forecastScalar > 0 ? '+' : ''}${pos.forecastScalar.toFixed(1)} (乘数 ${pos.scalarMultiplier.toFixed(2)}x)`;
-    if (pos.forecastScalar <= -5) {
+    // 诚实性：池外自选标的（catalog 未收录）无 bars，EWMAC/年线信号缺席，
+    // forecastScalar 恒 0 → 乘数 1.0x。这是「数据缺失下的中性降级」而非真实中性信号，
+    // notes 不得谎报「中性震荡区间」（与 mock 假分位同类问题）。
+    const hasRealBars = Array.isArray(inst.bars) && inst.bars.length >= 60;
+    let note = hasRealBars
+      ? `标量 ${pos.forecastScalar > 0 ? '+' : ''}${pos.forecastScalar.toFixed(1)} (乘数 ${pos.scalarMultiplier.toFixed(2)}x)`
+      : `无行情数据（池外自选，未接入 parquet），信号缺席，按中性 1.0x 配置——建议以官方池标的替代`;
+    if (!hasRealBars) {
+      // 已含说明，不再追加信号解读
+    } else if (pos.forecastScalar <= -5) {
       note += '；跌破均线/负动量，Carver 强制压降仓位防守';
     } else if (pos.forecastScalar >= 5) {
       note += '；站上年线/正动量，释放进攻仓位';
@@ -262,3 +431,79 @@ export function calculateCarverDynamicAllocation(
     message: `Carver 动态策略计算完毕: 权益配置仓位 ${equityRatio}% (¥${totalAllocated.toLocaleString()})，保留现金安全垫 ¥${cashReserve.toLocaleString()}`,
   };
 }
+
+export interface QuickBacktestResult {
+  ok: boolean;
+  message?: string;
+  totalPoints: number;
+  startDate: string;
+  endDate: string;
+  cagrPct: number;
+  annVolPct: number;
+  sharpe: number;
+  maxDrawdownPct: number;
+  calmar: number;
+  tradableCount: number;
+}
+
+/**
+ * 📈 为自选组合快速计算历史回测业绩指标
+ */
+export async function runQuickPortfolioBacktest(
+  portfolio: CustomPortfolio,
+  catalog: AShareInstrument[],
+  settings: CarverSettings
+): Promise<QuickBacktestResult> {
+  const { runRealBacktest } = await import('./backtestEngine');
+  const { resolveUniverse } = await import('./bundles');
+
+  const bundleRes = portfolioToBundle(portfolio, catalog);
+  if (!bundleRes.ok || !bundleRes.bundle) {
+    return {
+      ok: false,
+      message: bundleRes.missing.length ? `缺少标的行情: ${bundleRes.missing.join(', ')}` : '无法解析组合',
+      totalPoints: 0,
+      startDate: '',
+      endDate: '',
+      cagrPct: 0,
+      annVolPct: 0,
+      sharpe: 0,
+      maxDrawdownPct: 0,
+      calmar: 0,
+      tradableCount: 0,
+    };
+  }
+
+  const resolved = resolveUniverse(catalog, bundleRes.bundle);
+  if (!resolved.length) {
+    return {
+      ok: false,
+      message: '有效标的为空',
+      totalPoints: 0,
+      startDate: '',
+      endDate: '',
+      cagrPct: 0,
+      annVolPct: 0,
+      sharpe: 0,
+      maxDrawdownPct: 0,
+      calmar: 0,
+      tradableCount: 0,
+    };
+  }
+
+  const res = runRealBacktest(resolved, settings);
+  const m = res.metrics.carver;
+  return {
+    ok: true,
+    totalPoints: res.series.length,
+    startDate: res.metrics.startDate,
+    endDate: res.metrics.endDate,
+    cagrPct: m.cagrPct,
+    annVolPct: m.annVolPct,
+    sharpe: m.sharpe,
+    maxDrawdownPct: m.maxDrawdownPct,
+    calmar: m.calmar,
+    tradableCount: resolved.length,
+  };
+}
+

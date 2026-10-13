@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, lazy, Suspense } from 'react';
 import { 
   AShareInstrument, 
   CarverSettings 
@@ -11,17 +11,20 @@ import { AShareDataService } from './services/apiClient';
 import { Header } from './components/Header';
 import { PortfolioSummary } from './components/PortfolioSummary';
 import { CarverPositionSizer } from './components/CarverPositionSizer';
-import { StrategyAnalysisPanel } from './components/StrategyAnalysisPanel';
-import { RebalanceExecutionPanel } from './components/RebalanceExecutionPanel';
-import { BacktestSandbox } from './components/BacktestSandbox';
-import { DataAdapterConsole } from './components/DataAdapterConsole';
 import { AddInstrumentModal } from './components/AddInstrumentModal';
-import { InstrumentDeepAnalysisPanel } from './components/InstrumentDeepAnalysisPanel';
-import { CustomPortfolioDiagnosticPanel } from './components/CustomPortfolioDiagnosticPanel';
-import { DocumentationCenter } from './components/DocumentationCenter';
+
+// 代码分割 (Code-splitting)：非首屏重度面板采用懒加载，大幅缩减首屏单体 JS 体积
+const StrategyAnalysisPanel = lazy(() => import('./components/StrategyAnalysisPanel').then(m => ({ default: m.StrategyAnalysisPanel })));
+const RebalanceExecutionPanel = lazy(() => import('./components/RebalanceExecutionPanel').then(m => ({ default: m.RebalanceExecutionPanel })));
+const BacktestSandbox = lazy(() => import('./components/BacktestSandbox').then(m => ({ default: m.BacktestSandbox })));
+const DataAdapterConsole = lazy(() => import('./components/DataAdapterConsole').then(m => ({ default: m.DataAdapterConsole })));
+const InstrumentDeepAnalysisPanel = lazy(() => import('./components/InstrumentDeepAnalysisPanel').then(m => ({ default: m.InstrumentDeepAnalysisPanel })));
+const CustomPortfolioDiagnosticPanel = lazy(() => import('./components/CustomPortfolioDiagnosticPanel').then(m => ({ default: m.CustomPortfolioDiagnosticPanel })));
+const DocumentationCenter = lazy(() => import('./components/DocumentationCenter').then(m => ({ default: m.DocumentationCenter })));
 
 // 组合（bundle）层：把 catalog 按组合定义过滤+套权重，得到可切换的测试宇宙
 import { DEFAULT_BUNDLES, BALANCED9_ID, resolveUniverse, InstrumentBundle } from './services/bundles';
+import { IMPORTED_BUNDLE_ID } from './services/customPortfolioStore';
 import { BundleSelector } from './components/BundleSelector';
 
 const BUNDLES_KEY = 'canver.bundles.v1';
@@ -173,6 +176,18 @@ export default function App() {
     });
   };
 
+  // 诊断面板「导入主页面」：以固定 imported 槽位覆盖式接收外部组合（多次导入覆盖不新建），
+  // 并切换为主页面激活组合——随后全部按主页面设置计算（Sizer/回测/分析全链路）。
+  const handleImportToMain = (bundle: InstrumentBundle) => {
+    setBundles(prev => {
+      const next = [...prev.filter(b => b.id !== IMPORTED_BUNDLE_ID), bundle];
+      persistBundles(next);
+      return next;
+    });
+    setActiveBundleId(IMPORTED_BUNDLE_ID);
+    persistActiveId(IMPORTED_BUNDLE_ID);
+  };
+
   const handleUpdateCurrentShares = (id: string, shares: number) => {
     setUniverse(prev => {
       const updated = prev.map(inst => inst.id === id ? { ...inst, currentShares: shares } : inst);
@@ -301,57 +316,65 @@ export default function App() {
           />
         )}
 
-        {activeTab === 'analytics' && (
-          <InstrumentDeepAnalysisPanel
-            universe={activeUniverse}
-            positions={positions}
-            settings={settings}
-            onNavigateToExecution={() => setActiveTab('execution')}
-          />
-        )}
+        <Suspense fallback={
+          <div className="flex flex-col items-center justify-center p-16 text-slate-400 font-mono gap-3">
+            <div className="w-6 h-6 border-2 border-emerald-500 border-t-transparent rounded-full animate-spin" />
+            <span className="text-xs">按需载入模块资源...</span>
+          </div>
+        }>
+          {activeTab === 'analytics' && (
+            <InstrumentDeepAnalysisPanel
+              universe={activeUniverse}
+              positions={positions}
+              settings={settings}
+              onNavigateToExecution={() => setActiveTab('execution')}
+            />
+          )}
 
-        {activeTab === 'strategy' && (
-          <StrategyAnalysisPanel
-            universe={activeUniverse}
-          />
-        )}
+          {activeTab === 'strategy' && (
+            <StrategyAnalysisPanel
+              universe={activeUniverse}
+            />
+          )}
 
-        {activeTab === 'execution' && (
-          <RebalanceExecutionPanel
-            positions={positions}
-            settings={settings}
-            onExecuteRebalance={handleExecuteRebalance}
-          />
-        )}
+          {activeTab === 'execution' && (
+            <RebalanceExecutionPanel
+              positions={positions}
+              settings={settings}
+              onExecuteRebalance={handleExecuteRebalance}
+            />
+          )}
 
-        {activeTab === 'backtest' && (
-          <BacktestSandbox
-            universe={activeUniverse}
-            settings={settings}
-            summary={summary}
-          />
-        )}
+          {activeTab === 'backtest' && (
+            <BacktestSandbox
+              universe={activeUniverse}
+              settings={settings}
+              summary={summary}
+            />
+          )}
 
-        {activeTab === 'adapter' && (
-          <DataAdapterConsole
-            universe={universe}
-            onUniverseUpdated={setUniverse}
-            latestTradeDate={latestTradeDate}
-            onSyncLatest={handleSyncLatest}
-            isSyncingLatest={isSyncingLatest}
-          />
-        )}
+          {activeTab === 'adapter' && (
+            <DataAdapterConsole
+              universe={universe}
+              onUniverseUpdated={setUniverse}
+              latestTradeDate={latestTradeDate}
+              onSyncLatest={handleSyncLatest}
+              isSyncingLatest={isSyncingLatest}
+            />
+          )}
 
-        {activeTab === 'portfolio' && (
-          <CustomPortfolioDiagnosticPanel
-            universe={universe}
-            settings={settings}
-          />
-        )}
+          {activeTab === 'portfolio' && (
+            <CustomPortfolioDiagnosticPanel
+              universe={universe}
+              settings={settings}
+              onImportToMain={handleImportToMain}
+            />
+          )}
 
-        {activeTab === 'docs' && (
-          <DocumentationCenter />
-        )}
+          {activeTab === 'docs' && (
+            <DocumentationCenter />
+          )}
+        </Suspense>
       </main>
 
       {/* 实时行情同步状态悬浮提示 */}
