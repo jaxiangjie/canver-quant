@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "updatedAt": "2026-10-14T10:55:05.637Z",
+  "updatedAt": "2026-10-14T11:09:04.632Z",
   "entries": [
     {
       "code": "562500",
@@ -19,7 +19,7 @@
       "isETF": true,
       "riskBudgetWeight": 0.05,
       "hfqToMarketFactor": 1,
-      "addedAt": "2026-10-14T10:55:05.637Z",
+      "addedAt": "2026-10-14T11:09:04.632Z",
       "source": "tencent_hfq"
     }
   ]

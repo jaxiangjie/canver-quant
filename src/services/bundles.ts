@@ -68,13 +68,30 @@ export function resolveUniverse(
   catalog: AShareInstrument[],
   bundle?: InstrumentBundle | null,
 ): AShareInstrument[] {
-  if (!bundle || bundle.items.length === 0) return catalog;
+  return resolveUniverseDetailed(catalog, bundle).universe;
+}
+
+/**
+ * resolveUniverse 的显式丢腿版（tribunal D1c2/G3i1）：
+ * 旧版对 catalog 缺失的 id 静默 continue——组合导入后若用户删标的/池丢 code，
+ * 剩余腿因引擎「绝对预算、无重归一」而整体低配，界面零提示。
+ * dropped 列表让调用方（App.tsx）能对用户显式告警；universe 语义与原版完全一致。
+ */
+export function resolveUniverseDetailed(
+  catalog: AShareInstrument[],
+  bundle?: InstrumentBundle | null,
+): { universe: AShareInstrument[]; dropped: string[] } {
+  if (!bundle || bundle.items.length === 0) return { universe: catalog, dropped: [] };
   const byId = new Map(catalog.map((i) => [i.id, i]));
   const out: AShareInstrument[] = [];
+  const dropped: string[] = [];
   for (const it of bundle.items) {
     const inst = byId.get(it.id);
-    if (!inst) continue;
+    if (!inst) {
+      dropped.push(it.id);
+      continue;
+    }
     out.push({ ...inst, riskBudgetWeight: it.riskBudgetWeight });
   }
-  return out;
+  return { universe: out, dropped };
 }

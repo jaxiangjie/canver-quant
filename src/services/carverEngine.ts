@@ -8,6 +8,13 @@ import {
 import { evaluateAShareStrategies } from './ashareStrategies';
 import { computeUniverseCorrelationMatrix } from './correlationEngine';
 
+/**
+ * IDM/组合波动实算的相关性窗口（交易日）——定仓与回测的执行口径。
+ * 深度分析面板（CorrelationAnalysisMatrix）的窗口选择器只改展示，不改执行；
+ * 若未来要开放为可配置项，应走 CarverSettings 并同步面板语义，而非只改一侧。
+ */
+export const IDM_CORRELATION_WINDOW = 60;
+
 export const DEFAULT_CARVER_SETTINGS: CarverSettings = {
   totalCapital: 1000000,         // 100 万元
   targetAnnualVol: 0.18,         // 18% 目标年化波动率（匹配 poorlab 11 腿池 σ_T≈18–22% 画像；受 20% 杠杆帽约束）
@@ -251,7 +258,9 @@ export function calculatePortfolio(
 
   // 0. Compute Carver IDM (Instrument Diversification Multiplier)
   // 相关性矩阵只算一次，IDM 与组合波动实算共用（manual 模式同样需要 rho 来实算组合波动）
-  const corrResult = safeUniverse.length > 1 ? computeUniverseCorrelationMatrix(safeUniverse, 60) : null;
+  // 执行口径固定 60 日窗口（tribunal D2c2/G3i5：深度分析面板的窗口选择器只影响展示，
+  // 不改执行——面板在选择器≠60 时会显式标注此口径，避免「展示值≠执行值」的误导）。
+  const corrResult = safeUniverse.length > 1 ? computeUniverseCorrelationMatrix(safeUniverse, IDM_CORRELATION_WINDOW) : null;
   const avgUniverseCorrelation = corrResult?.averageUniverseCorrelation ?? 0.30;
   let computedIDM = 1.0;
   if (safeUniverse.length > 1 && settings.useIDM !== false) {

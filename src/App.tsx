@@ -24,7 +24,7 @@ const CustomPortfolioDiagnosticPanel = lazy(() => import('./components/CustomPor
 const DocumentationCenter = lazy(() => import('./components/DocumentationCenter').then(m => ({ default: m.DocumentationCenter })));
 
 // 组合（bundle）层：把 catalog 按组合定义过滤+套权重，得到可切换的测试宇宙
-import { DEFAULT_BUNDLES, BALANCED9_ID, resolveUniverse, InstrumentBundle } from './services/bundles';
+import { DEFAULT_BUNDLES, BALANCED9_ID, resolveUniverseDetailed, InstrumentBundle } from './services/bundles';
 import { IMPORTED_BUNDLE_ID } from './services/customPortfolioStore';
 import { BundleSelector } from './components/BundleSelector';
 
@@ -127,10 +127,12 @@ export default function App() {
     () => bundles.find((b) => b.id === activeBundleId) ?? bundles[0],
     [bundles, activeBundleId],
   );
-  const activeUniverse = useMemo(
-    () => resolveUniverse(universe, activeBundle),
+  const activeUniverseResolution = useMemo(
+    () => resolveUniverseDetailed(universe, activeBundle),
     [universe, activeBundle],
   );
+  const activeUniverse = activeUniverseResolution.universe;
+  const droppedLegs = activeUniverseResolution.dropped;
 
   // Recalculate Carver Portfolio Positions whenever universe or settings change
   const { positions, summary } = useMemo(() => {
@@ -305,6 +307,24 @@ export default function App() {
 
       {/* 主工作区 View 切换 */}
       <main className="flex-1 max-w-[1520px] w-full mx-auto pb-12">
+        {/* 组合丢腿显式告警（tribunal D1c2/G3i1）：组合引用的标的已不在池中时，
+            引擎按绝对预算低配（剩余权重和 <1），静默会发生「钱只投了一半」——
+            这里明确告知缺哪些腿、影响是什么，绝不悄悄重归一（那会改变用户风险预算）。 */}
+        {droppedLegs.length > 0 && (
+          <div className="mx-4 mt-4 px-4 py-3 rounded-lg border border-amber-500/50 bg-amber-950/40 text-amber-200 text-xs font-sans flex items-start gap-3">
+            <span className="text-amber-400 text-base leading-none">⚠️</span>
+            <div className="flex-1">
+              <div className="font-semibold text-amber-300">
+                当前组合「{activeBundle.name}」有 {droppedLegs.length} 条腿的标的已不在统一池中：
+                <span className="font-mono">{droppedLegs.join('、')}</span>
+              </div>
+              <div className="mt-1 text-amber-200/80">
+                这些腿已被跳过，剩余腿按原风险预算绝对配比执行（不会自动放大填满，故组合整体可能低配、留现金）。
+                如想恢复：在「数据适配」页重新拉取该标的入池，或编辑当前组合移除这些腿。
+              </div>
+            </div>
+          </div>
+        )}
         {activeTab === 'sizer' && (
           <CarverPositionSizer
             universe={activeUniverse}

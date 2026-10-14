@@ -272,8 +272,10 @@ export async function syncSingleInstrument(
       ? quoteSnapshot.currentPrice
       : vwapFallback;
   const livePreClose = quoteSnapshot && quoteSnapshot.preClose > 0 ? quoteSnapshot.preClose : 0;
-  // dailyATR 由 hfq bars 算出（绝对值是后复权口径），按「市价 / hfq 最后收盘」比值
-  // 换算为市价口径后再展示（否则福耀 ATR=129 而市价 54.7，表格口径自相矛盾）。
+  // dailyATR 的市价化唯一 owner（tribunal G1c3/G3i2）：inst.dailyATR 一律是「由 hfq bars
+  // 算出的绝对值」（realData 加载时刻意不做 factor 换算，避免 registry 标的被缩放两次成 f²）。
+  // 此处按「市价 / hfq 最后收盘」比值换算一次，registry 与底座标的一致对待。
+  // atrScale≈1 时（市价与 hfq 末收一致的 ETF）天然无操作。
   const hfqLastClose = prevBars.length > 0 ? prevBars[prevBars.length - 1].close : 0;
   const atrScale = livePrice > 0 && hfqLastClose > 0 ? livePrice / hfqLastClose : 1;
   const displayATR =

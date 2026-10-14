@@ -5,6 +5,15 @@ export const PORTFOLIO_COLLECTION_STORAGE_KEY = 'carver_custom_portfolios_librar
 export const PORTFOLIO_SELECTED_SLOTS_KEY = 'carver_portfolio_slots_selection_v2';
 
 // 官方内置预设基准（锁定官方标记）
+/**
+ * 预设快照的内容版本时间（tribunal Fc4）：必须是固定值，不能是模块加载时的 new Date()。
+ * 旧版两个 42 万预设用 new Date().toISOString()——本地副本在 mergePortfolios 的
+ * updatedAt 比较中永远「最新」，用户在别的设备/git 库里对这两个组合的编辑被永久
+ * 影子覆盖，git 版本管理形同虚设。固定版本时间后：用户任何编辑（updatedAt=now）
+ * 都能赢过预设，未编辑时与 git 库内容一致（打平无冲突）。
+ */
+const PRESET_SNAPSHOT_VERSION = '2026-10-13T00:00:00.000Z';
+
 export const OFFICIAL_PORTFOLIOS: CustomPortfolio[] = [
   {
     id: 'official_balanced9',
@@ -31,7 +40,7 @@ export const OFFICIAL_PORTFOLIOS: CustomPortfolio[] = [
     description: '重仓恒生科技、航天与机器人，缺乏固收与现金备付垫的现状组合',
     totalCapital: 420000,
     isOfficial: false,
-    updatedAt: new Date().toISOString(),
+    updatedAt: PRESET_SNAPSHOT_VERSION,
     items: [
       { id: 'act_1', code: '513180.SH', name: '恒生科技ETF (QDII)', category: 'qdii_etf', amount: 150000, profitRate: -24.0, profitAmount: -36000, annualizedVol: 0.28, notes: '单标的占比高达35.7%，严重超配高波' },
       { id: 'act_2', code: '562500.SH', name: '机器人ETF华夏', category: 'sector_etf', amount: 45000, profitRate: -13.3, profitAmount: -6000, annualizedVol: 0.35, notes: '高贝塔制造业赛道' },
@@ -47,7 +56,7 @@ export const OFFICIAL_PORTFOLIOS: CustomPortfolio[] = [
     description: '恒科削减、机器人航天合并控仓、增补国债与现金垫的平衡组合',
     totalCapital: 420000,
     isOfficial: false,
-    updatedAt: new Date().toISOString(),
+    updatedAt: PRESET_SNAPSHOT_VERSION,
     items: [
       { id: 'opt_1', code: '513180.SH', name: '恒生科技ETF (QDII)', category: 'qdii_etf', amount: 75000, annualizedVol: 0.28, notes: '压降至18%合理风控区间，保留反弹弹性' },
       { id: 'opt_2', code: '562500.SH', name: '机器人/航天成长', category: 'sector_etf', amount: 45000, annualizedVol: 0.35, notes: '合并控仓在11%左右，作为进攻卫星' },

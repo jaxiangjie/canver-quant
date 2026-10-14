@@ -302,8 +302,13 @@ export async function loadRealUniverse(): Promise<AShareInstrument[]> {
     });
 
     // registry 标的（腾讯 hfq 源）：用 factor 把 hfq 绝对值换算回市价口径。
-    // currentPrice/preClose/vwapPrice/dailyATR 都是「市价口径」展示与定仓输入；
+    // currentPrice/preClose/vwapPrice 是「市价口径」展示与定仓输入（加载时给市价初值，
+    // sync 后由腾讯快照覆盖，双 owner 无害——都是「设为市价」而非「缩放」）；
     // bars 保持 hfq（收益率/波动率口径），factor 只影响绝对值不影响收益率。
+    // ⚠️ dailyATR 刻意不做 factor 换算（tribunal G1c3）：它是「由 hfq bars 算出的绝对值」，
+    // 市价化唯一 owner 是 liveMarketSync 的 atrScale=市价/hfq末收。此处若也乘 factor，
+    // registry 标的的 ATR 会被缩放两次（f²，f=0.5→25%、f=1.86→3.46 倍），
+    // 腐败值流入 instrumentsStore → computeEWMAC → carverEngine 目标股数。
     const factor = hfqToMarketFactor.get(code) ?? 1;
     const marketOr = (v: number) => (factor !== 1 && v > 0 ? Number((v * factor).toFixed(4)) : v);
     out.push({
@@ -311,7 +316,7 @@ export async function loadRealUniverse(): Promise<AShareInstrument[]> {
       currentPrice: marketOr(currentPrice),
       preClose: marketOr(preClose),
       changePct,
-      dailyATR: marketOr(dailyATR),
+      dailyATR, // hfq 口径——市价化由 liveMarketSync 统一负责（唯一 owner）
       annualizedVol,
       vwapPrice: vwapPrice > 0 ? marketOr(vwapPrice) : undefined,
       bars,

@@ -14,7 +14,16 @@
  *       ② VWAP=hfq close ≠ 市价——用快照市价/hfq 最后收盘的 factor 换算修正
  *          （存 registry，realData 加载时对 registry 标的应用，保住「VWAP 兜底市价」机制）。
  */
-import { existsSync, mkdirSync, readFileSync, writeFileSync, readdirSync, unlinkSync, renameSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  writeFileSync,
+  readdirSync,
+  unlinkSync,
+  renameSync,
+  statSync,
+} from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
@@ -72,6 +81,8 @@ export interface StagingQualityReport {
   pb: number;
   warnings: string[];
   storedAt: string;
+  /** 配对 bars 文件的字节数——promote 时校验 meta/bars 未被并发轮次改写（撕裂写入防护） */
+  barsBytes?: number;
 }
 
 function ensureDirs(target: StagingTarget): string {
@@ -297,59 +308,64 @@ export function isPlausibleAShareCode(code: string): boolean {
   return /^\d{6}$/.test(bare) && /^[0-9]/.test(bare);
 }
 
-/** 拉取池外标的 → 断裂检测 → 快照 → 落缓存区，返回质量报告 */
+/** 拉取池外标的 → 断裂检测 → 快照 → 落缓存区，返回质量报告（同 code 串行执行，见 withStagingLock） */
 export async function fetchToStaging(code: string, target: StagingTarget): Promise<StagingQualityReport> {
-  const bare = code.split('.')[0];
-  if (!isPlausibleAShareCode(code)) {
-    throw new Error(`无效代码「${code}」：只支持 6 位 A 股/ETF 代码`);
-  }
-  const dir = ensureDirs(target);
+  return withStagingLock(`staging:${code.split('.')[0]}`, async () => {
+    const bare = code.split('.')[0];
+    if (!isPlausibleAShareCode(code)) {
+      throw new Error(`无效代码「${code}」：只支持 6 位 A 股/ETF 代码`);
+    }
+    const dir = ensureDirs(target);
 
-  const [rawBars, quote] = await Promise.all([
-    fetchTencentHfqDaily(bare),
-    fetchTencentQuote(bare).catch(() => null),
-  ]);
+    const [rawBars, quote] = await Promise.all([
+      fetchTencentHfqDaily(bare),
+      fetchTencentQuote(bare).catch(() => null),
+    ]);
 
-  const { bars, findings, rescaledCount } = detectAndFixBreaks(rawBars);
-  const lastHfqClose = bars[bars.length - 1].close;
-  const marketPrice = quote?.currentPrice ?? 0;
-  const hfqToMarketFactor = marketPrice > 0 && lastHfqClose > 0 ? marketPrice / lastHfqClose : 0;
+    const { bars, findings, rescaledCount } = detectAndFixBreaks(rawBars);
+    const lastHfqClose = bars[bars.length - 1].close;
+    const marketPrice = quote?.currentPrice ?? 0;
+    const hfqToMarketFactor = marketPrice > 0 && lastHfqClose > 0 ? marketPrice / lastHfqClose : 0;
 
-  const warnings: string[] = [];
-  if (!quote) warnings.push('实时快照获取失败（无市价/PE/PB，factor 未定）');
-  if (bars.length < 250) warnings.push(`历史不足一年（${bars.length} 根），波动率/回测置信度有限`);
-  const warnOnly = findings.filter((f) => f.action === 'warn-only');
-  if (warnOnly.length) {
-    warnings.push(
-      `${warnOnly.length} 处疑似断裂仅告警未重标定（VWAP 同向或数据源无真实成交额）：${warnOnly
-        .slice(0, 3)
-        .map((f) => `${f.date}(${f.pct}%)`)
-        .join(', ')}`,
-    );
-  }
+    const warnings: string[] = [];
+    if (!quote) warnings.push('实时快照获取失败（无市价/PE/PB，factor 未定）');
+    if (bars.length < 250) warnings.push(`历史不足一年（${bars.length} 根），波动率/回测置信度有限`);
+    const warnOnly = findings.filter((f) => f.action === 'warn-only');
+    if (warnOnly.length) {
+      warnings.push(
+        `${warnOnly.length} 处疑似断裂仅告警未重标定（VWAP 同向或数据源无真实成交额）：${warnOnly
+          .slice(0, 3)
+          .map((f) => `${f.date}(${f.pct}%)`)
+          .join(', ')}`,
+      );
+    }
 
-  const report: StagingQualityReport = {
-    code: bare,
-    name: quote?.name || bare,
-    target,
-    barCount: bars.length,
-    firstDate: bars[0].tradeDate,
-    lastDate: bars[bars.length - 1].tradeDate,
-    coverageYears: Number(((new Date(bars[bars.length - 1].tradeDate).getTime() - new Date(bars[0].tradeDate).getTime()) / (365.25 * 86400000)).toFixed(1)),
-    annualizedVol: computeAnnualizedVol(bars),
-    suspiciousBreaks: findings,
-    rescaledCount,
-    marketPrice,
-    hfqToMarketFactor: Number(hfqToMarketFactor.toFixed(6)),
-    peTTM: quote?.peTTM ?? 0,
-    pb: quote?.pb ?? 0,
-    warnings,
-    storedAt: new Date().toISOString(),
-  };
+    const report: StagingQualityReport = {
+      code: bare,
+      name: quote?.name || bare,
+      target,
+      barCount: bars.length,
+      firstDate: bars[0].tradeDate,
+      lastDate: bars[bars.length - 1].tradeDate,
+      coverageYears: Number(((new Date(bars[bars.length - 1].tradeDate).getTime() - new Date(bars[0].tradeDate).getTime()) / (365.25 * 86400000)).toFixed(1)),
+      annualizedVol: computeAnnualizedVol(bars),
+      suspiciousBreaks: findings,
+      rescaledCount,
+      marketPrice,
+      hfqToMarketFactor: Number(hfqToMarketFactor.toFixed(6)),
+      peTTM: quote?.peTTM ?? 0,
+      pb: quote?.pb ?? 0,
+      warnings,
+      storedAt: new Date().toISOString(),
+    };
 
-  writeFileSync(path.join(dir, `${bare}_bars.json`), JSON.stringify(bars), 'utf-8');
-  writeFileSync(path.join(dir, `${bare}_meta.json`), JSON.stringify(report, null, 2), 'utf-8');
-  return report;
+    // 先写 bars、后写 meta（meta 是「本轮完成」标记）；barsBytes 记账供 promote 校验配对
+    const barsJson = JSON.stringify(bars);
+    report.barsBytes = Buffer.byteLength(barsJson, 'utf-8');
+    writeFileSync(path.join(dir, `${bare}_bars.json`), barsJson, 'utf-8');
+    writeFileSync(path.join(dir, `${bare}_meta.json`), JSON.stringify(report, null, 2), 'utf-8');
+    return report;
+  });
 }
 
 export interface StagingListItem {
@@ -384,6 +400,26 @@ export function readPoolRegistry(): PoolRegistryEntry[] {
   }
 }
 
+/**
+ * promote 专用严格读取：文件损坏/结构异常必须抛错中止晋升。
+ * tribunal G2c3：旧版 promote 复用宽容读取，registry 一坏就以「仅含新条目」的数组
+ * 覆盖写回——整个池的登记被静默抹掉（parquet 还在但 catalog 再也不引用）。
+ * 读失败时的正确行为是拒绝写入，不是降级成空数组。
+ */
+function readPoolRegistryStrict(): PoolRegistryEntry[] {
+  if (!existsSync(REGISTRY_PATH)) return [];
+  let data: any;
+  try {
+    data = JSON.parse(readFileSync(REGISTRY_PATH, 'utf-8'));
+  } catch (e: any) {
+    throw new Error(`读取 pool_registry.json 失败（${e?.message || e}）——已中止晋升，防止覆盖写清空已登记数据`);
+  }
+  if (!Array.isArray(data?.entries)) {
+    throw new Error('pool_registry.json 结构损坏（entries 非数组）——已中止晋升，防止覆盖写清空已登记数据');
+  }
+  return data.entries as PoolRegistryEntry[];
+}
+
 function writePoolRegistry(entries: PoolRegistryEntry[]): void {
   const payload = { version: 1, updatedAt: new Date().toISOString(), entries };
   const tmp = REGISTRY_PATH + '.tmp';
@@ -406,28 +442,74 @@ async function writeStagingToParquet(bare: string): Promise<void> {
   const barsPath = path.join(STAGING_DIR, `${bare}_bars.json`);
   const parquetPath = path.resolve(process.cwd(), 'data', 'parquet', 'daily', `${bare}_hfq.parquet`);
   const script = path.resolve(process.cwd(), 'scripts', 'staging_to_parquet.py');
-  // node spawn 的 PATH 与交互 shell 不同——多候选逐个尝试（ENOENT=无此解释器，exit≠0=可能缺 pyarrow）
+  // node spawn 的 PATH 与交互 shell 不同——多候选逐个尝试（ENOENT=无此解释器，exit≠0=可能缺 pyarrow）。
+  // 个人绝对路径改为从 LOCALAPPDATA 动态推导，避免把某台机器的用户名提交进源码。
+  const localAppData = process.env.LOCALAPPDATA || '';
   const candidates = [
     process.env.PYTHON_BIN,
     'python',
     'py',
-    'C:/Users/jaxiangjie/AppData/Local/Programs/Python/Python313/python.exe',
+    localAppData ? path.join(localAppData, 'Programs', 'Python', 'Python313', 'python.exe') : '',
   ].filter(Boolean) as string[];
+  const SPAWN_TIMEOUT_MS = 120000;
   let lastErr = '';
   for (const py of candidates) {
-    const ok = await new Promise<boolean>((resolve) => {
+    const outcome = await new Promise<{ ok: boolean; err: string }>((resolve) => {
       try {
-        const child = spawn(py, [script, barsPath, parquetPath, bare], { stdio: 'ignore' });
-        child.on('error', () => resolve(false));
-        child.on('exit', (code_) => resolve(code_ === 0 && existsSync(parquetPath)));
-      } catch {
-        resolve(false);
+        const child = spawn(py, [script, barsPath, parquetPath, bare], {
+          stdio: ['ignore', 'ignore', 'pipe'],
+        });
+        // 超时强杀：hung python（pyarrow 卡死/文件锁）曾能让 promote 请求永远挂起
+        const timer = setTimeout(() => {
+          try {
+            child.kill('SIGKILL');
+          } catch {
+            /* already dead */
+          }
+        }, SPAWN_TIMEOUT_MS);
+        let stderrTail = '';
+        child.stderr?.on('data', (d) => {
+          stderrTail = (stderrTail + String(d)).slice(-400);
+        });
+        const settle = (ok: boolean, err: string) => {
+          clearTimeout(timer);
+          resolve({ ok, err });
+        };
+        child.on('error', (e) => settle(false, `spawn 失败: ${e.message}`));
+        child.on('exit', (code_, signal) => {
+          if (code_ === 0 && existsSync(parquetPath)) settle(true, '');
+          else if (signal) settle(false, `超时 ${SPAWN_TIMEOUT_MS / 1000}s 被杀（${signal}）`);
+          else settle(false, `exit ${code_}${stderrTail ? ' | ' + stderrTail.trim() : ''}`);
+        });
+      } catch (e: any) {
+        resolve({ ok: false, err: String(e?.message || e) });
       }
     });
-    if (ok) return;
-    lastErr = py;
+    if (outcome.ok) return;
+    lastErr = `${py} → ${outcome.err}`;
   }
-  throw new Error(`staging_to_parquet.py 全部候选解释器失败（最后尝试 ${lastErr}）——请确认 pyarrow 可用`);
+  throw new Error(`staging_to_parquet.py 全部候选解释器失败：${lastErr}`);
+}
+
+/**
+ * per-code in-flight 串行化（tribunal Cc3/G2c4）：同一 code 的 fetch/promote 绝不交叉执行。
+ * 旧版零并发控制：两个 fetch 可把「A 轮 bars + B 轮 meta」混写成一对，用户按 B 的
+ * 质量报告批准、晋升的却是 A 的数据；promote 也可能读到半写状态。
+ * 锁 key 不含 target——fetch 与 promote 同 code 也要互斥（后者消费前者的产物）。
+ */
+const stagingInflight = new Map<string, Promise<unknown>>();
+
+function withStagingLock<T>(key: string, fn: () => Promise<T>): Promise<T> {
+  const prev = stagingInflight.get(key) ?? Promise.resolve();
+  const run = prev.then(fn, fn); // 前一个无论成败都继续，不级联失败
+  const tracked = run.finally(() => {
+    if (stagingInflight.get(key) === tracked) stagingInflight.delete(key);
+  });
+  // tracked 必须挂 no-op catch：Node 15+ 默认 unhandled-rejections=throw，
+  // 无人认领的 rejected promise 会直接杀进程（调用方各自 await 的是 run）。
+  tracked.catch(() => {});
+  stagingInflight.set(key, tracked);
+  return run;
 }
 
 /** 确认入池：staging bars 落统一池 parquet + registry 登记。返回晋升后的 registry 条目 */
@@ -435,42 +517,58 @@ export async function promoteFromStaging(
   code: string,
   opts: { riskBudgetWeight?: number; category?: string; name?: string } = {},
 ): Promise<PoolRegistryEntry> {
-  const bare = code.split('.')[0];
-  const metaPath = path.join(STAGING_DIR, `${bare}_meta.json`);
-  const barsPath = path.join(STAGING_DIR, `${bare}_bars.json`);
-  if (!existsSync(metaPath) || !existsSync(barsPath)) {
-    throw new Error(`staging 中无 ${bare} 的数据，请先执行拉取`);
-  }
-  const report = JSON.parse(readFileSync(metaPath, 'utf-8')) as StagingQualityReport;
-  if (report.target !== 'staging') throw new Error('analysis 区数据不可晋升');
-  if (!(report.hfqToMarketFactor > 0)) {
-    throw new Error('该标的无有效快照市价（factor 未定），无法保证市价口径——请重新拉取后再晋升');
-  }
-  await writeStagingToParquet(bare);
+  return withStagingLock(`staging:${code.split('.')[0]}`, async () => {
+    const bare = code.split('.')[0];
+    const metaPath = path.join(STAGING_DIR, `${bare}_meta.json`);
+    const barsPath = path.join(STAGING_DIR, `${bare}_bars.json`);
+    if (!existsSync(metaPath) || !existsSync(barsPath)) {
+      throw new Error(`staging 中无 ${bare} 的数据，请先执行拉取`);
+    }
+    const report = JSON.parse(readFileSync(metaPath, 'utf-8')) as StagingQualityReport;
+    if (report.target !== 'staging') throw new Error('analysis 区数据不可晋升');
+    if (!(report.hfqToMarketFactor > 0)) {
+      throw new Error('该标的无有效快照市价（factor 未定），无法保证市价口径——请重新拉取后再晋升');
+    }
+    // meta/bars 一致性：meta 记录了配对 bars 的字节数，不一致说明被并发轮次改动过（撕裂写入），
+    // 宁可诚实失败也不把「报告描述 A、实际内容是 B」的数据晋升入池。
+    if (typeof report.barsBytes === 'number') {
+      let actualBytes = -1;
+      try {
+        actualBytes = statSync(barsPath).size;
+      } catch {
+        /* 下面统一抛错 */
+      }
+      if (actualBytes !== report.barsBytes) {
+        throw new Error(`staging 数据不完整（bars 与 meta 不配对，${actualBytes}≠${report.barsBytes}）——请重新拉取后再晋升`);
+      }
+    }
+    await writeStagingToParquet(bare);
 
-  const entries = readPoolRegistry();
-  const isETF = ['5', '1'].includes(bare[0]);
-  const entry: PoolRegistryEntry = {
-    code: bare,
-    name: opts.name || report.name,
-    category: opts.category || inferCategory(bare, isETF),
-    isETF,
-    riskBudgetWeight: opts.riskBudgetWeight ?? 0.05,
-    hfqToMarketFactor: report.hfqToMarketFactor,
-    addedAt: new Date().toISOString(),
-    source: 'tencent_hfq',
-  };
-  const next = entries.filter((e) => e.code !== bare).concat(entry);
-  writePoolRegistry(next);
+    // 严格读取：registry 损坏时中止晋升，而不是用只含新条目的数组覆盖写（G2c3）
+    const entries = readPoolRegistryStrict();
+    const isETF = ['5', '1'].includes(bare[0]);
+    const entry: PoolRegistryEntry = {
+      code: bare,
+      name: opts.name || report.name,
+      category: opts.category || inferCategory(bare, isETF),
+      isETF,
+      riskBudgetWeight: opts.riskBudgetWeight ?? 0.05,
+      hfqToMarketFactor: report.hfqToMarketFactor,
+      addedAt: new Date().toISOString(),
+      source: 'tencent_hfq',
+    };
+    const next = entries.filter((e) => e.code !== bare).concat(entry);
+    writePoolRegistry(next);
 
-  // 清理 staging（数据已入池；analysis 区保留可重拉的语义不受影响）
-  try {
-    unlinkSync(metaPath);
-    unlinkSync(barsPath);
-  } catch {
-    /* ignore */
-  }
-  return entry;
+    // 清理 staging（数据已入池；analysis 区保留可重拉的语义不受影响）
+    try {
+      unlinkSync(metaPath);
+      unlinkSync(barsPath);
+    } catch {
+      /* ignore */
+    }
+    return entry;
+  });
 }
 
 /** realData 用：把 registry 条目转成与 mockData 模板同构的元数据模板 */

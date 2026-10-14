@@ -133,14 +133,27 @@ app.post('/api/ashare/staging/promote', async (req, res) => {
       category: category ? String(category) : undefined,
       name: name ? String(name) : undefined,
     });
-    // 晋升后刷新 catalog（registry → loadRealUniverse）+ 估值富化，主页面全链路立即可用
-    const base = await loadRealUniverse();
-    const enr = enrichUniverseValuation(base);
-    instrumentsStore = enr.instruments;
-    console.log(
-      `[staging] promoted ${entry.code} ${entry.name} — catalog 现为 ${instrumentsStore.length} 只`,
-    );
-    res.json({ success: true, entry, catalogSize: instrumentsStore.length });
+    // 晋升后刷新 catalog（registry → loadRealUniverse）+ 估值富化，主页面全链路立即可用。
+    // tribunal Cc2：刷新失败时数据其实已成功入池——若返回 500，用户重试会死在
+    // 「staging 已清理、无数据可晋升」，被永久锁在门外。正确语义是 200 +
+    // catalogRefreshed:false：数据在池里，重启服务即可恢复页面。
+    try {
+      const base = await loadRealUniverse();
+      const enr = enrichUniverseValuation(base);
+      instrumentsStore = enr.instruments;
+      console.log(
+        `[staging] promoted ${entry.code} ${entry.name} — catalog 现为 ${instrumentsStore.length} 只`,
+      );
+      res.json({ success: true, entry, catalogSize: instrumentsStore.length });
+    } catch (refreshErr: any) {
+      console.error(`[staging] ${entry.code} 已入池，但 catalog 刷新失败:`, refreshErr?.message || refreshErr);
+      res.json({
+        success: true,
+        entry,
+        catalogRefreshed: false,
+        message: '数据已成功入池，但页面 catalog 刷新失败——请重启服务恢复显示',
+      });
+    }
   } catch (err: any) {
     res.status(500).json({ success: false, message: err?.message || 'promote failed' });
   }
