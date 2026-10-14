@@ -28,6 +28,7 @@ import {
   fetchToStaging,
   listStaging,
   promoteFromStaging,
+  isPlausibleAShareCode,
   type StagingTarget,
 } from './src/services/stagingData';
 
@@ -71,7 +72,16 @@ app.get('/api/ashare/portfolios', (_req, res) => {
       return;
     }
     const raw = JSON.parse(fs.readFileSync(PORTFOLIOS_PATH, 'utf8'));
-    res.json({ success: true, portfolios: Array.isArray(raw?.portfolios) ? raw.portfolios : [] });
+    // tribunal Cc5：JSON 合法但结构不匹配（无 portfolios 字段/类型错）时旧版静默返回 []——
+    // 用户看到「我的组合全消失了」而不是「文件损坏」。这是 git 跟踪文件的最差失败模式。
+    if (!Array.isArray(raw?.portfolios)) {
+      res.status(500).json({
+        success: false,
+        message: `组合库文件损坏（${PORTFOLIOS_PATH} 缺 portfolios 数组）——请从 git 恢复或手动修复`,
+      });
+      return;
+    }
+    res.json({ success: true, portfolios: raw.portfolios });
   } catch (err: any) {
     res.status(500).json({ success: false, message: err?.message || 'read failed' });
   }
@@ -82,6 +92,18 @@ app.post('/api/ashare/portfolios', (req, res) => {
     const { portfolios } = req.body;
     if (!Array.isArray(portfolios)) {
       res.status(400).json({ success: false, message: 'portfolios array required' });
+      return;
+    }
+    // tribunal Cc5：条目级校验——旧版只验 Array.isArray，客户端过滤是唯一守卫，
+    // 坏条目（无 id / items 非数组）会原样落盘并毒化后续读取方。
+    const bad = portfolios.find(
+      (p: any) => !p || typeof p.id !== 'string' || !p.id || !Array.isArray(p.items),
+    );
+    if (bad) {
+      res.status(400).json({
+        success: false,
+        message: `组合条目缺少必需字段（id: string, items: array）：${JSON.stringify(bad).slice(0, 120)}`,
+      });
       return;
     }
     fs.mkdirSync(path.dirname(PORTFOLIOS_PATH), { recursive: true });
@@ -121,11 +143,28 @@ app.get('/api/ashare/staging', (_req, res) => {
 });
 
 // 确认入池：staging bars → 统一池 parquet + registry 登记 → 刷新内存 catalog
+const PROMOTE_CATEGORIES = ['broad_etf', 'commodity_etf', 'bond_etf', 'qdii_etf', 'sector_etf', 'stock_cn'];
 app.post('/api/ashare/staging/promote', async (req, res) => {
   try {
     const { code, riskBudgetWeight, category, name } = req.body || {};
     if (!code) {
       res.status(400).json({ success: false, message: 'code required' });
+      return;
+    }
+    // tribunal Cc6：路由边界校验——旧版 code 只在 fetch 路径校验，promote 路径的
+    // code.split('.')[0] 直接进 path.join（路径穿越可达 staging/parquet 目录之外）；
+    // riskBudgetWeight 放行 NaN/Infinity/-5/95（污染 registry 后喂 carverEngine 定仓数学）；
+    // category 任意字符串（下游 isT0/stampDutyExempt/estVol 按它分支）。
+    if (!isPlausibleAShareCode(String(code))) {
+      res.status(400).json({ success: false, message: `无效代码「${code}」：只支持 6 位 A 股/ETF 代码` });
+      return;
+    }
+    if (riskBudgetWeight !== undefined && !(typeof riskBudgetWeight === 'number' && Number.isFinite(riskBudgetWeight) && riskBudgetWeight > 0 && riskBudgetWeight <= 1)) {
+      res.status(400).json({ success: false, message: 'riskBudgetWeight 必须是 (0, 1] 的有限数（小数，如 0.05）' });
+      return;
+    }
+    if (category !== undefined && !PROMOTE_CATEGORIES.includes(String(category))) {
+      res.status(400).json({ success: false, message: `category 必须是 ${PROMOTE_CATEGORIES.join('/')} 之一` });
       return;
     }
     const entry = await promoteFromStaging(String(code), {
@@ -138,9 +177,11 @@ app.post('/api/ashare/staging/promote', async (req, res) => {
     // 「staging 已清理、无数据可晋升」，被永久锁在门外。正确语义是 200 +
     // catalogRefreshed:false：数据在池里，重启服务即可恢复页面。
     try {
-      const base = await loadRealUniverse();
-      const enr = enrichUniverseValuation(base);
-      instrumentsStore = enr.instruments;
+      // 与 initStore 共用完整 catalog 管线（tribunal Cc1）：合并持久化持仓/权重 +
+      // 估值/基本面富化 + VWAP 市价兜底。旧版两步刷新会让 promote 后到重启前
+      // 用户持仓从内存消失、已删标的复活、fundamentals 丢失。
+      const fresh = await finalizeCatalog(await loadRealUniverse());
+      instrumentsStore = fresh;
       console.log(
         `[staging] promoted ${entry.code} ${entry.name} — catalog 现为 ${instrumentsStore.length} 只`,
       );
@@ -453,36 +494,15 @@ app.post('/api/ashare/sentinel/check', (_req, res) => {
   res.json({ success: true, report: rep });
 });
 
-// 启动时加载顺序：llmquant 的本地 parquet 真实数据 -> 合并持久化覆盖(持仓/权重) -> 无则回退 mock
-async function initStore() {
-  // 1. 基础池：真实 parquet 或 mock
-  let base: any[] = [];
-  if (process.env.USE_REAL_DATA !== 'false') {
-    try {
-      const real = await loadRealUniverse();
-      if (real.length) {
-        base = real;
-        // 如实区分真实 parquet 与回退模板：旧实现无论读到什么都打印 "loaded N from parquet"，
-        // 即使 parquet 目录整个不存在也会谎报成功，用户以为在看真实行情。
-        const fb = real.filter((i: any) => i?.dataSource === 'fallback').length;
-        console.log(
-          `[real-data] loaded ${real.length} instruments from parquet (real=${real.length - fb}, fallback=${fb}) @ ${PARQUET_DIR}`,
-        );
-        if (fb > 0) {
-          console.warn(
-            `[real-data] ${fb} 标的无 parquet 数据，已回退合成模板 —— 这部分行情并非真实，回测结论需谨慎`,
-          );
-        }
-      }
-    } catch (err: any) {
-      console.warn('[real-data] load failed:', err?.message);
-    }
-  }
-  if (!base.length) {
-    base = [...INITIAL_INSTRUMENTS];
-    console.log('[real-data] using mock instruments');
-  }
-
+/**
+ * catalog 构建共享管线（tribunal Cc1）：initStore 与 staging promote 刷新必须走同一条路。
+ * promote 旧版只做 loadRealUniverse + enrichUniverseValuation 两步——用户持仓/权重在
+ * 内存中丢失（promote 后到重启前主页面持仓全没）、deletedCodes 过滤失效（已删标的复活）、
+ * fundamentals 与 VWAP 市价兜底全跳过。此处收敛为唯一实现，两方共用。
+ *
+ * 步骤：合并持久化覆盖(持仓/权重/deletedCodes) → 估值富化 → 基本面富化 → VWAP 市价兜底
+ */
+async function finalizeCatalog(base: any[]): Promise<any[]> {
   // 2. 合并持久化 store（RESET_STORE=true 时忽略，强制重新从 parquet 加载）
   if (process.env.RESET_STORE !== 'true' && storePathExists()) {
     const persisted = loadPersistedStore();
@@ -527,7 +547,7 @@ async function initStore() {
     console.warn('[fundamentals] enrich failed:', err?.message);
   }
 
-  // 市价口径兜底（启动即生效，不依赖腾讯）：parquet 的 currentPrice 是 hfq 后复权价，
+  // 5. 市价口径兜底（启动即生效，不依赖腾讯）：parquet 的 currentPrice 是 hfq 后复权价，
   // 直接用于定仓会按复权因子算错目标股数。以 realData 算出的 VWAP（amount/volume，
   // 原始成交数据不经复权）覆盖；随后启动自动同步会用快照实时价再覆盖（更新）。
   base = base.map((inst: any) =>
@@ -535,6 +555,41 @@ async function initStore() {
       ? { ...inst, currentPrice: inst.vwapPrice }
       : inst,
   );
+  return base;
+}
+
+// 启动时加载顺序：llmquant 的本地 parquet 真实数据 -> 合并持久化覆盖(持仓/权重) -> 无则回退 mock
+async function initStore() {
+  // 1. 基础池：真实 parquet 或 mock
+  let base: any[] = [];
+  if (process.env.USE_REAL_DATA !== 'false') {
+    try {
+      const real = await loadRealUniverse();
+      if (real.length) {
+        base = real;
+        // 如实区分真实 parquet 与回退模板：旧实现无论读到什么都打印 "loaded N from parquet"，
+        // 即使 parquet 目录整个不存在也会谎报成功，用户以为在看真实行情。
+        const fb = real.filter((i: any) => i?.dataSource === 'fallback').length;
+        console.log(
+          `[real-data] loaded ${real.length} instruments from parquet (real=${real.length - fb}, fallback=${fb}) @ ${PARQUET_DIR}`,
+        );
+        if (fb > 0) {
+          console.warn(
+            `[real-data] ${fb} 标的无 parquet 数据，已回退合成模板 —— 这部分行情并非真实，回测结论需谨慎`,
+          );
+        }
+      }
+    } catch (err: any) {
+      console.warn('[real-data] load failed:', err?.message);
+    }
+  }
+  if (!base.length) {
+    base = [...INITIAL_INSTRUMENTS];
+    console.log('[real-data] using mock instruments');
+  }
+
+  // 2-5. 共享 catalog 构建管线（initStore 与 promote 刷新共用，tribunal Cc1）
+  base = await finalizeCatalog(base);
 
   // 数据新鲜度自检：parquet 最新 bar 距今天数（>3 天提示重建，防止看着陈旧 K 线做决策）
   try {
