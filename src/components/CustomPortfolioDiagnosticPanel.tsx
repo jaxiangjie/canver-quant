@@ -474,7 +474,8 @@ export const CustomPortfolioDiagnosticPanel: React.FC<Props> = ({ universe, sett
     }
     setStagingBusy(true);
     try {
-      // 逐个拉取到缓存区
+      // 逐个拉取到缓存区（tribunal Ec3：fetch 加 60s 超时——hung server 时旧版
+      // stagingBusy 永远卡 true；响应形状校验——旧版直接信任 j.report/j.warnings）
       const reports: any[] = [];
       for (const code of codes) {
         try {
@@ -482,10 +483,11 @@ export const CustomPortfolioDiagnosticPanel: React.FC<Props> = ({ universe, sett
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ code, target: 'staging' }),
+            signal: AbortSignal.timeout(60_000),
           });
-          const j = await res.json();
-          if (j.success) reports.push(j.report);
-          else reports.push({ code, name: code, error: j.message || '拉取失败' });
+          const j: any = await res.json().catch(() => null);
+          if (j && j.success && j.report) reports.push(j.report);
+          else reports.push({ code, name: code, error: j?.message || `服务端错误 HTTP ${res.status}` });
         } catch (e: any) {
           reports.push({ code, name: code, error: e?.message || '网络错误' });
         }
@@ -496,10 +498,10 @@ export const CustomPortfolioDiagnosticPanel: React.FC<Props> = ({ universe, sett
         .map(
           (r) =>
             `${r.code} ${r.name}：${r.barCount} 根（${r.firstDate} ~ ${r.lastDate}，${r.coverageYears} 年）` +
-            `· 年化波动 ${(r.annualizedVol * 100).toFixed(1)}%` +
+            `· 年化波动 ${((r.annualizedVol || 0) * 100).toFixed(1)}%` +
             `· 市价 ¥${r.marketPrice}` +
             (r.rescaledCount ? ` · 已重标定 ${r.rescaledCount} 处断裂` : '') +
-            (r.warnings.length ? ` · ⚠️ ${r.warnings.join('；')}` : ''),
+            (Array.isArray(r.warnings) && r.warnings.length ? ` · ⚠️ ${r.warnings.join('；')}` : ''),
         )
         .join('\n');
       if (!okReports.length) {
@@ -510,7 +512,7 @@ export const CustomPortfolioDiagnosticPanel: React.FC<Props> = ({ universe, sett
         `已拉取 ${okReports.length}/${reports.length} 只到缓存区（质量报告）：\n\n${summary}\n` +
           (failed.length ? `\n失败：${failed.map((f) => f.code).join(', ')}\n` : '') +
           `\n确认将以上 ${okReports.length} 只晋升入统一池？\n` +
-          `（入池后这些标的的数据源固定为腾讯 hfq，之后请刷新页面再点「导入主页面」）`
+          `（入池后这些标的的数据源固定为腾讯 hfq）`
       );
       if (!proceed) {
         alert('已保留在缓存区（data/cache/staging），可稍后在服务端确认晋升。');
@@ -525,10 +527,11 @@ export const CustomPortfolioDiagnosticPanel: React.FC<Props> = ({ universe, sett
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ code: r.code }),
+            signal: AbortSignal.timeout(60_000),
           });
-          const j = await res.json();
-          if (j.success) promoted.push(`${r.code} ${r.name}`);
-          else promoteFailed.push(`${r.code}: ${j.message}`);
+          const j: any = await res.json().catch(() => null);
+          if (j && j.success) promoted.push(`${r.code} ${r.name}`);
+          else promoteFailed.push(`${r.code}: ${j?.message || `服务端错误 HTTP ${res.status}`}`);
         } catch (e: any) {
           promoteFailed.push(`${r.code}: ${e?.message || '网络错误'}`);
         }
@@ -538,7 +541,9 @@ export const CustomPortfolioDiagnosticPanel: React.FC<Props> = ({ universe, sett
           ? `✅ 已入池 ${promoted.length} 只：${promoted.join('、')}\n（统一池 parquet + pool_registry.json，随 git 版本管理）\n\n`
           : '') +
           (promoteFailed.length ? `❌ 晋升失败：\n${promoteFailed.join('\n')}\n\n` : '') +
-          `下一步：刷新页面（F5）让 catalog 扩展生效，然后重新点击「导入主页面」。`
+          // 2026-10-14 修正（tribunal Cc1 后）：promote 路由已走 finalizeCatalog 共享管线，
+          // catalog 即时刷新——旧文案「刷新页面 F5 让 catalog 扩展生效」已过期。
+          `catalog 已即时刷新，可直接点击「导入主页面」。`
       );
     } finally {
       setStagingBusy(false);

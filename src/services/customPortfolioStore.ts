@@ -14,6 +14,16 @@ export const PORTFOLIO_SELECTED_SLOTS_KEY = 'carver_portfolio_slots_selection_v2
  */
 const PRESET_SNAPSHOT_VERSION = '2026-10-13T00:00:00.000Z';
 
+/** 现金占位 code（tribunal Fc7：旧版 sentinel 字面量散落 4 处，改语义时易漏） */
+const CASH_CODE = 'CASH';
+
+/**
+ * 快速回测的按需 K 线拉取缓存（tribunal Ec3）：code -> Promise<bars>。
+ * 缓存 Promise 本身而非结果——并发回测同一标的时自动合并请求；拉取失败即从缓存
+ * 移除（不缓存失败，下次可重试）。会话级生命周期（页面刷新后自然失效）。
+ */
+const barsFetchCache = new Map<string, Promise<AShareInstrument['bars']>>();
+
 export const OFFICIAL_PORTFOLIOS: CustomPortfolio[] = [
   {
     id: 'official_balanced9',
@@ -173,7 +183,7 @@ export function portfolioToBundle(
   // 不阻止导入（2026-10-13 修正：此前 CASH 被归入缺失永久阻止，与组合含现金的正常语义矛盾）
   let cashAmount = 0;
   const valid = portfolio.items.filter(it => {
-    if (it.code === 'CASH') {
+    if (it.code === CASH_CODE) {
       cashAmount += Math.max(0, it.amount);
       return false;
     }
@@ -188,22 +198,43 @@ export function portfolioToBundle(
   if (!valid.length) {
     return { ok: false, missing: missing.length ? missing : ['组合中没有可导入的标的'] };
   }
+
+  // 同 code 多行合并（tribunal Fc6）：自选组合允许同一标的占多行（不同买入批次/备注），
+  // 旧版原样透传到 bundle items——resolveUniverse 解析出两条相同标的，该腿风险预算
+  // 翻倍（静默超配）。按 code 合并：金额求和，显式权重求和（一方未设则退化为金额主导）。
+  const mergedByCode = new Map<string, (typeof valid)[number]>();
+  for (const it of valid) {
+    const prev = mergedByCode.get(it.code);
+    if (!prev) {
+      mergedByCode.set(it.code, { ...it });
+      continue;
+    }
+    mergedByCode.set(it.code, {
+      ...prev,
+      amount: prev.amount + it.amount,
+      riskBudgetWeight:
+        typeof prev.riskBudgetWeight === 'number' && typeof it.riskBudgetWeight === 'number'
+          ? prev.riskBudgetWeight + it.riskBudgetWeight
+          : undefined,
+    });
+  }
+  const legs = [...mergedByCode.values()];
   if (missing.length > 0) {
     return { ok: false, missing };
   }
 
-  // 权重：全显式 -> 归一化显式值；否则按 amount 占比
-  const allExplicit = valid.every(it => typeof it.riskBudgetWeight === 'number' && it.riskBudgetWeight > 0);
+  // 权重：全显式 -> 归一化显式值；否则按 amount 占比（legs 已按 code 去重合并）
+  const allExplicit = legs.every(it => typeof it.riskBudgetWeight === 'number' && it.riskBudgetWeight > 0);
   let weights: number[];
   if (allExplicit) {
-    const sum = valid.reduce((s, it) => s + (it.riskBudgetWeight || 0), 0);
-    weights = sum > 0 ? valid.map(it => (it.riskBudgetWeight || 0) / sum) : valid.map(() => 1 / valid.length);
+    const sum = legs.reduce((s, it) => s + (it.riskBudgetWeight || 0), 0);
+    weights = sum > 0 ? legs.map(it => (it.riskBudgetWeight || 0) / sum) : legs.map(() => 1 / legs.length);
   } else {
-    const totalAmount = valid.reduce((s, it) => s + Math.max(0, it.amount), 0);
+    const totalAmount = legs.reduce((s, it) => s + Math.max(0, it.amount), 0);
     if (totalAmount <= 0) {
       return { ok: false, missing: ['组合内全部标的金额为 0，无法推导权重'] };
     }
-    weights = valid.map(it => Math.max(0, it.amount) / totalAmount);
+    weights = legs.map(it => Math.max(0, it.amount) / totalAmount);
   }
 
   const bundle: InstrumentBundle = {
@@ -213,9 +244,11 @@ export function portfolioToBundle(
       '自选组合「' + portfolio.name + '」导入（' + new Date().toISOString().slice(0, 10) +
       '）· 理想仓位结构，现持仓按 0 处理；多次导入覆盖本组合' +
       (cashAmount > 0
-        ? '；组合内现金 ¥' + cashAmount.toLocaleString() + ' 未入池，对应主页面现金垫'
+        ? // tribunal Fc6：诚实措辞——现金垫由主页面的全局资金口径折算（settings.totalCapital），
+          // 不是组合自身资金。组合资金≠全局资金时，旧文案「对应主页面现金垫」数学失真。
+          '；组合内现金 ¥' + cashAmount.toLocaleString() + ' 未入池（现金垫按主页面全局资金口径折算）'
         : ''),
-    items: valid.map((it, i) => ({
+    items: legs.map((it, i) => ({
       id: it.code.split('.')[0],
       riskBudgetWeight: Number(weights[i].toFixed(4)),
     })),
@@ -288,7 +321,7 @@ export function calculateRiskParityAllocation(
   // vol 下限 0.05（国债ETF 实测水平）：防未知 vol/超低波项权重爆炸。
   // vol 校验（tribunal Fc2）：NaN/Infinity/负数/未定义一律落到 0.25 默认值——
   // Math.max(0.05, NaN)=NaN 会污染全表；负 vol 被 Math.max 压到 0.05 反而拿最大权重。
-  const participable = items.filter(it => it.code !== 'CASH');
+  const participable = items.filter(it => it.code !== CASH_CODE);
   if (!participable.length) {
     // 组合只有现金占位：无权益可配，全部置 0（调用方应提示用户先添加标的）
     items.forEach(it => result.set(it.id, 0));
@@ -327,7 +360,7 @@ export function calculateRiskParityAllocation(
 
   // CASH 占位项显式清 0（非缺席，调用方 get(it.id) 一定命中）
   items.forEach(it => {
-    if (it.code === 'CASH') result.set(it.id, 0);
+    if (it.code === CASH_CODE) result.set(it.id, 0);
   });
 
   return result;
@@ -363,13 +396,13 @@ export function calculateCarverDynamicAllocation(
   });
 
   // 1. 过滤有效交易标的（剔除已有的现金占位，稍后由系统根据余量自动精确生成）
-  const tradableItems = portfolio.items.filter(it => it.code !== 'CASH');
+  const tradableItems = portfolio.items.filter(it => it.code !== CASH_CODE);
   if (tradableItems.length === 0) {
     return {
       items: [
         {
           id: `cash_${Date.now()}`,
-          code: 'CASH',
+          code: CASH_CODE,
           name: '现金 / 货币基金 (安全垫)',
           category: 'bond_etf',
           amount: portfolio.totalCapital,
@@ -495,6 +528,24 @@ export interface QuickBacktestResult {
   tradableCount: number;
 }
 
+/** 快速回测失败返回（tribunal Fc7：旧版同一 11 字段对象手抄 3 份，措辞已漂移） */
+function quickBacktestFailure(message: string): QuickBacktestResult {
+  return {
+    ok: false,
+    message,
+    totalPoints: 0,
+    startDate: '',
+    endDate: '',
+    cagrPct: 0,
+    annVolPct: 0,
+    sharpe: 0,
+    maxDrawdownPct: 0,
+    calmar: 0,
+    tradableCount: 0,
+  };
+}
+
+
 /**
  * 📈 为自选组合快速计算历史回测业绩指标
  */
@@ -508,41 +559,20 @@ export async function runQuickPortfolioBacktest(
 
   const bundleRes = portfolioToBundle(portfolio, catalog);
   if (!bundleRes.ok || !bundleRes.bundle) {
-    return {
-      ok: false,
-      message: bundleRes.missing.length ? `缺少标的行情: ${bundleRes.missing.join(', ')}` : '无法解析组合',
-      totalPoints: 0,
-      startDate: '',
-      endDate: '',
-      cagrPct: 0,
-      annVolPct: 0,
-      sharpe: 0,
-      maxDrawdownPct: 0,
-      calmar: 0,
-      tradableCount: 0,
-    };
+    return quickBacktestFailure(bundleRes.missing.length ? `缺少标的行情: ${bundleRes.missing.join(', ')}` : '无法解析组合');
   }
 
   const resolved = resolveUniverse(catalog, bundleRes.bundle);
   if (!resolved.length) {
-    return {
-      ok: false,
-      message: '有效标的为空',
-      totalPoints: 0,
-      startDate: '',
-      endDate: '',
-      cagrPct: 0,
-      annVolPct: 0,
-      sharpe: 0,
-      maxDrawdownPct: 0,
-      calmar: 0,
-      tradableCount: 0,
-    };
+    return quickBacktestFailure('有效标的为空');
   }
 
   // /api/ashare/instruments 已 strip bars 瘦身（17MB → 200KB）：catalog 里的 bars
   // 为空或伪随机合成线（syntheticBars），直接跑回测会得到空 series。
   // 真实 K 线经 /api/ashare/bars/:code 按需拉取补齐（与回测沙盘/风险贡献图同款链路）。
+  // 模块级 Promise 缓存（tribunal Ec3）：旧版每次回测都对每腿重新拉一遍——
+  // 同一会话内切 A/B 槽位或重复点回测时全量重拉。缓存 Promise 本身（防并发重入），
+  // 不设 TTL（parquet 日更，会话级缓存足够；数据更新后刷新页面即自然失效）。
   const { AShareDataService } = await import('./apiClient');
   const withBars: AShareInstrument[] = [];
   for (const inst of resolved) {
@@ -551,26 +581,22 @@ export async function runQuickPortfolioBacktest(
       withBars.push(inst);
       continue;
     }
-    const bars = await AShareDataService.fetchInstrumentBars(inst.code);
+    let inflight = barsFetchCache.get(inst.code);
+    if (!inflight) {
+      inflight = AShareDataService.fetchInstrumentBars(inst.code).catch((e) => {
+        barsFetchCache.delete(inst.code); // 失败不缓存，下次可重试
+        throw e;
+      });
+      barsFetchCache.set(inst.code, inflight);
+    }
+    const bars = await inflight.catch(() => [] as AShareInstrument['bars']);
     withBars.push({ ...inst, bars, syntheticBars: bars.length >= 20 ? false : true });
   }
   const tradable = withBars.filter(
     (i) => Array.isArray(i.bars) && i.bars.length >= 20 && !i.syntheticBars,
   ).length;
   if (!tradable) {
-    return {
-      ok: false,
-      message: '所有标的的真实 K 线均拉取失败（/api/ashare/bars），无法回测',
-      totalPoints: 0,
-      startDate: '',
-      endDate: '',
-      cagrPct: 0,
-      annVolPct: 0,
-      sharpe: 0,
-      maxDrawdownPct: 0,
-      calmar: 0,
-      tradableCount: 0,
-    };
+    return quickBacktestFailure('所有标的的真实 K 线均拉取失败（/api/ashare/bars），无法回测');
   }
 
   // 用组合自身的资金跑回测（2026-10-14 修正，tribunal Fc1/V24）：此前直接透传调用方
@@ -590,19 +616,7 @@ export async function runQuickPortfolioBacktest(
   // UI 把「样本不足」渲染成绿色的「CAGR +0.00%」。回测引擎默认需要 252 根历史，
   // 这里要求至少 60 个交易日净值点才承认指标可信，否则明确失败。
   if (res.series.length < 60) {
-    return {
-      ok: false,
-      message: `样本不足：仅 ${res.series.length} 个交易日净值点（回测引擎需 252 根历史/标），指标不可信，未展示`,
-      totalPoints: res.series.length,
-      startDate: res.metrics.startDate,
-      endDate: res.metrics.endDate,
-      cagrPct: 0,
-      annVolPct: 0,
-      sharpe: 0,
-      maxDrawdownPct: 0,
-      calmar: 0,
-      tradableCount: tradable,
-    };
+    return quickBacktestFailure(`样本不足：仅 ${res.series.length} 个交易日净值点（回测引擎需 252 根历史/标），指标不可信，未展示`);
   }
   return {
     ok: true,

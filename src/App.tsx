@@ -167,29 +167,35 @@ export default function App() {
   };
 
   const handleUpdateInstrumentWeight = (id: string, weight: number) => {
-    // 权重是「组合」的属性：编辑即更新当前激活组合的该标的权重，并持久化到 localStorage
-    setBundles(prev => {
-      const next = prev.map(b =>
+    // 权重是「组合」的属性：编辑即更新当前激活组合的该标的权重（持久化见下方 useEffect）
+    setBundles(prev =>
+      prev.map(b =>
         b.id === activeBundleId
           ? { ...b, items: b.items.map(it => (it.id === id ? { ...it, riskBudgetWeight: weight } : it)) }
           : b,
-      );
-      persistBundles(next);
-      return next;
-    });
+      ),
+    );
   };
 
   // 诊断面板「导入主页面」：以固定 imported 槽位覆盖式接收外部组合（多次导入覆盖不新建），
   // 并切换为主页面激活组合——随后全部按主页面设置计算（Sizer/回测/分析全链路）。
   const handleImportToMain = (bundle: InstrumentBundle) => {
-    setBundles(prev => {
-      const next = [...prev.filter(b => b.id !== IMPORTED_BUNDLE_ID), bundle];
-      persistBundles(next);
-      return next;
-    });
+    // slot 契约强制（tribunal D1c4）：固定槽位覆盖语义。旧版隐含假设「调用方一定传
+    // id==='imported'」——未来任何传入其他 id 的调用方都会造出重复组合（正是该槽位
+    // 要防的 bug）。这里显式归一把契约钉死。
+    const normalized: InstrumentBundle =
+      bundle.id === IMPORTED_BUNDLE_ID ? bundle : { ...bundle, id: IMPORTED_BUNDLE_ID };
+    setBundles(prev => [...prev.filter(b => b.id !== IMPORTED_BUNDLE_ID), normalized]);
     setActiveBundleId(IMPORTED_BUNDLE_ID);
     persistActiveId(IMPORTED_BUNDLE_ID);
   };
+
+  // bundles 持久化（tribunal D1c3）：旧版在 setBundles updater 内调 persistBundles——
+  // updater 是渲染阶段，渲染期写 localStorage 是副作用（严格模式双调用下今天只因
+  // 幂等而无害）。改为状态变化后统一落盘，单一出口。
+  useEffect(() => {
+    persistBundles(bundles);
+  }, [bundles]);
 
   const handleUpdateCurrentShares = (id: string, shares: number) => {
     setUniverse(prev => {
@@ -339,7 +345,7 @@ export default function App() {
 
         <ErrorBoundary name="定仓工作台模块">
         <Suspense fallback={
-          <div className="flex flex-col items-center justify-center p-16 text-slate-400 font-mono gap-3">
+          <div className="flex flex-col items-center justify-center min-h-[60vh] p-16 text-slate-400 font-mono gap-3">
             <div className="w-6 h-6 border-2 border-emerald-500 border-t-transparent rounded-full animate-spin" />
             <span className="text-xs">按需载入模块资源...</span>
           </div>

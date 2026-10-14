@@ -29,6 +29,9 @@ import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
 import type { AShareInstrument } from '../types/ashare';
 import { codeToTencentSymbol } from './liveMarketSync';
+import { scanAndRescaleBreaks, type BreakFinding } from './breakDetection';
+
+export type { BreakFinding };
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -114,16 +117,27 @@ export async function fetchTencentHfqDaily(
     const url =
       'https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?param=' +
       `${symbol},day,,${endDate},${PAGE},hfq`;
-    let res: Response;
-    try {
-      res = await fetch(url, {
-        headers: { 'User-Agent': 'Mozilla/5.0' },
-        signal: AbortSignal.timeout(15_000),
-      });
-    } catch (e: any) {
-      throw new Error(`tencent hfq 第 ${page + 1} 页网络失败（已收集 ${collected.size} 根）: ${e?.message || e}`);
+    // 每页 15s 超时 + 失败重试 1 次（tribunal G2c8：旧版一次 5xx/超时就抛错，
+    // 已收集的全部 bars 随内存一起丢弃，用户只能整轮重拉）
+    let res: Response | null = null;
+    for (let attempt = 0; attempt < 2 && !res; attempt++) {
+      try {
+        const r = await fetch(url, {
+          headers: { 'User-Agent': 'Mozilla/5.0' },
+          signal: AbortSignal.timeout(15_000),
+        });
+        if (r.ok) res = r;
+        else if (attempt === 1) throw new Error(`tencent hfq http ${r.status}`);
+      } catch (e: any) {
+        if (attempt === 1) {
+          throw new Error(
+            `tencent hfq 第 ${page + 1} 页网络失败（已收集 ${collected.size} 根，重试 1 次后仍失败）: ${e?.message || e}`,
+          );
+        }
+        await new Promise((r2) => setTimeout(r2, 1000));
+      }
     }
-    if (!res.ok) throw new Error(`tencent hfq http ${res.status}`);
+    if (!res) throw new Error(`tencent hfq 第 ${page + 1} 页无响应`);
     const j: any = await res.json();
     const data = j?.data?.[symbol];
     if (!data) throw new Error('tencent hfq response missing data');
@@ -219,75 +233,23 @@ export async function fetchTencentQuote(code: string): Promise<TencentQuote> {
   };
 }
 
-export interface BreakFinding {
-  date: string;
-  pct: number;
-  action: 'rescaled' | 'warn-only';
-}
 
 /**
- * 复权断裂检测 + VWAP 甄别重标定——阈值与 realData.ts 一致（12%/15%/guard 0.95-1.05）。
- * 注意（2026-10-14 修正，tribunal V5/V6）：staging 源的 amount 是伪成交额（volShares×close），
- * vwapOf≡close、close/vwap 比值恒为 1，VWAP 甄别在数学上不可用——本函数对 staging 数据
- * 只做候选检测 + warn-only，不捏造 factor。上游若换源提供真实 amount，甄别自动恢复。
+ * 复权断裂检测 + VWAP 甄别重标定——逻辑已抽至 breakDetection.ts 单一模块
+ * （tribunal G1c6/G2c3：旧版是手抄副本，与 realData 内联块已漂移）。
+ * staging 源的 amount 是伪成交额（volShares×close）——模块按数据驱动指纹自动
+ * 识别为合成源，VWAP 甄别对其数学上不可用，只做候选检测 + warn-only，绝不捏造
+ * factor（tribunal V5/V6）。上游若换源提供真实 amount，甄别自动恢复（无需改代码）。
  */
 export function detectAndFixBreaks(bars: StagingBar[]): {
   bars: StagingBar[];
   findings: BreakFinding[];
   rescaledCount: number;
 } {
-  const BREAK_THRESHOLD = 0.12;
-  const LIMIT_UP_ERA_START = '1996-12-16';
-  const RATIO_DRIFT = 0.15;
-  const RATIO_WINDOW = 10;
-  const findings: BreakFinding[] = [];
-  let rescaledCount = 0;
-
-  const medianOf = (xs: number[]): number => {
-    if (!xs.length) return 0;
-    const s = [...xs].sort((a, b) => a - b);
-    return s[Math.floor(s.length / 2)];
-  };
-
-  for (let i = 1; i < bars.length; i++) {
-    const pc = bars[i - 1].close;
-    if (pc <= 0) continue;
-    if (bars[i].tradeDate < LIMIT_UP_ERA_START) continue;
-    const r = (bars[i].close - pc) / pc;
-    if (Math.abs(r) <= BREAK_THRESHOLD) continue;
-
-    const vwapOf = (b: StagingBar) => (b.volume > 0 && b.amount > 0 ? b.amount / b.volume : 0);
-    const before: number[] = [];
-    for (let j = Math.max(0, i - RATIO_WINDOW); j < i; j++) {
-      if (vwapOf(bars[j]) > 0) before.push(bars[j].close / vwapOf(bars[j]));
-    }
-    const after: number[] = [];
-    for (let j = i; j < Math.min(bars.length, i + RATIO_WINDOW); j++) {
-      if (vwapOf(bars[j]) > 0) after.push(bars[j].close / vwapOf(bars[j]));
-    }
-    const ratioBefore = medianOf(before);
-    const ratioAfter = medianOf(after);
-    let factor = 0;
-    if (ratioBefore > 0 && ratioAfter > 0 && Math.abs(ratioAfter / ratioBefore - 1) > RATIO_DRIFT) {
-      factor = ratioBefore / ratioAfter;
-    }
-    // 与 realData.ts 同步：VWAP 窗口缺失时不再假设"当日收益约 0"捏造 factor——
-    // guard 收紧后该兜底会腐蚀合法数据，一律 warn-only（fail-loud）。
-    if (factor > 0 && (factor < 0.95 || factor > 1.05)) {
-      for (let j = i; j < bars.length; j++) {
-        bars[j].open *= factor;
-        bars[j].high *= factor;
-        bars[j].low *= factor;
-        bars[j].close *= factor;
-        bars[j].amount = bars[j].volume * bars[j].close; // 伪成交额同步
-      }
-      rescaledCount++;
-      findings.push({ date: bars[i].tradeDate, pct: Number((r * 100).toFixed(1)), action: 'rescaled' });
-    } else {
-      findings.push({ date: bars[i].tradeDate, pct: Number((r * 100).toFixed(1)), action: 'warn-only' });
-    }
-  }
-  return { bars, findings, rescaledCount };
+  const scan = scanAndRescaleBreaks(bars as any[], {
+    normDate: (d) => String(d).slice(0, 10),
+  });
+  return { bars, findings: scan.findings, rescaledCount: scan.rescaledCount };
 }
 
 function computeAnnualizedVol(bars: StagingBar[]): number {
@@ -329,6 +291,14 @@ export async function fetchToStaging(code: string, target: StagingTarget): Promi
 
     const warnings: string[] = [];
     if (!quote) warnings.push('实时快照获取失败（无市价/PE/PB，factor 未定）');
+    // factor 时间戳一致性（tribunal G1c5 生产侧）：quote.tradeDate 与 bars 末交易日必须
+    // 一致。盘中晋升会把当日波动烤进 factor 并永久固化（唯一刷新途径是重新晋升）。
+    // 不阻断（快照盘中价 vs 上一交易日 bars 是常见时点差），但必须显式警告。
+    if (quote?.tradeDate && bars.length && quote.tradeDate !== bars[bars.length - 1].tradeDate) {
+      warnings.push(
+        `快照日期 ${quote.tradeDate} 与末交易日 ${bars[bars.length - 1].tradeDate} 不一致——hfqToMarketFactor 含时点差（建议收盘后拉取）`,
+      );
+    }
     if (bars.length < 250) warnings.push(`历史不足一年（${bars.length} 根），波动率/回测置信度有限`);
     const warnOnly = findings.filter((f) => f.action === 'warn-only');
     if (warnOnly.length) {
@@ -601,9 +571,9 @@ export function registryToTemplates(entries: PoolRegistryEntry[]): AShareInstrum
 }
 
 /** registry 条目的 hfq→市价 factor（realData 加载 parquet 后应用） */
-export function getHfqToMarketFactors(): Map<string, number> {
+export function getHfqToMarketFactors(entries?: PoolRegistryEntry[]): Map<string, number> {
   const m = new Map<string, number>();
-  readPoolRegistry().forEach((e) => {
+  (entries ?? readPoolRegistry()).forEach((e) => {
     if (e.hfqToMarketFactor > 0) m.set(e.code, e.hfqToMarketFactor);
   });
   return m;

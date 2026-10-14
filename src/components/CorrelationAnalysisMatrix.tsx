@@ -405,7 +405,7 @@ export const CorrelationAnalysisMatrix: React.FC<CorrelationAnalysisMatrixProps>
                 Carver Ch.9
               </span>
             </div>
-            <span className="text-[10px] text-slate-500">IDM = 1 / √(1/N + (1-1/N)ρ)（理论值；定仓执行时受 maxIDM 约束）</span>
+            <span className="text-[10px] text-slate-500">IDM = 1 / √(1/N + (1-1/N)ρ)（实算值：ρ 截断至 [-0.2, 1]、IDM 钳制 [1.0, 2.5]——边界外公式不复现该值）</span>
           </div>
 
           <div className="p-4 bg-slate-950/70 border border-slate-800/80 rounded-lg flex flex-col gap-1">
