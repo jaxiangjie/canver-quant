@@ -10,6 +10,11 @@ data/*
 # 估值快照库与历史回补数据同样随仓库提交（clone 即可算分位，无需重新抓取）
 !data/valuation/
 !data/valuation/*.jsonl
+# 自选组合库（服务端持久化，随 git 提交做版本管理）
+!data/portfolios/
+!data/portfolios/*.json
+# 统一池 registry（staging 晋升标的的元数据，随 git 版本管理）
+!data/pool_registry.json
 .DS_Store
 *.log
 .env*

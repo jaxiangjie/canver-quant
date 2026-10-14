@@ -1,0 +1,26 @@
+{
+  "version": 1,
+  "updatedAt": "2026-10-13T01:33:56.425Z",
+  "entries": [
+    {
+      "code": "562500",
+      "name": "机器人ETF华夏",
+      "category": "broad_etf",
+      "isETF": true,
+      "riskBudgetWeight": 0.05,
+      "hfqToMarketFactor": 0.998811,
+      "addedAt": "2026-10-13T01:20:01.146Z",
+      "source": "tencent_hfq"
+    },
+    {
+      "code": "512660",
+      "name": "军工ETF国泰",
+      "category": "broad_etf",
+      "isETF": true,
+      "riskBudgetWeight": 0.05,
+      "hfqToMarketFactor": 1,
+      "addedAt": "2026-10-13T01:33:56.425Z",
+      "source": "tencent_hfq"
+    }
+  ]
+}

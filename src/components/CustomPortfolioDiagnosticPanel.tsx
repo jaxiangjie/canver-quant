@@ -15,6 +15,8 @@ import {
   portfolioToBundle,
   fetchServerPortfolios,
   mergePortfolios,
+  runQuickPortfolioBacktest,
+  QuickBacktestResult,
   PORTFOLIO_SELECTED_SLOTS_KEY,
 } from '../services/customPortfolioStore';
 import {
@@ -40,6 +42,7 @@ import {
   Lock,
   Target,
   Upload,
+  LineChart,
 } from 'lucide-react';
 
 interface Props {
@@ -475,6 +478,35 @@ export const CustomPortfolioDiagnosticPanel: React.FC<Props> = ({ universe, sett
       );
     } finally {
       setStagingBusy(false);
+    }
+  };
+
+  // 快速回测：对自选组合跑真实 walk-forward 回测（Carver 受保护口径），
+  // 复用主页面同款引擎（月度再平衡 + 缓冲带 + 成本模型），展示核心业绩指标。
+  const [quickBusy, setQuickBusy] = React.useState<'A' | 'B' | null>(null);
+  const [quickResult, setQuickResult] = React.useState<{
+    slot: 'A' | 'B';
+    result: QuickBacktestResult;
+  } | null>(null);
+  const handleQuickBacktest = async (portfolioId: string) => {
+    if (quickBusy) return;
+    const slot = portfolioId === portfolioA.id ? 'A' : 'B';
+    const target = portfolios.find((p) => p.id === portfolioId);
+    if (!target || !target.items.length) {
+      alert('该组合暂无标的，无法回测。');
+      return;
+    }
+    setQuickBusy(slot);
+    try {
+      const result = await runQuickPortfolioBacktest(target, universe, settings);
+      setQuickResult({ slot, result });
+      if (!result.ok) {
+        alert('回测未能完成：' + (result.message || '未知原因'));
+      }
+    } catch (e: any) {
+      alert('回测异常：' + (e?.message || '网络或引擎错误'));
+    } finally {
+      setQuickBusy(null);
     }
   };
 
@@ -1125,6 +1157,15 @@ export const CustomPortfolioDiagnosticPanel: React.FC<Props> = ({ universe, sett
                 <Wand2 className="w-3 h-3 text-slate-400" />
                 <span>静态满仓配平</span>
               </button>
+              <button
+                onClick={() => handleQuickBacktest(portfolioA.id)}
+                disabled={quickBusy !== null}
+                className="flex items-center gap-1 text-[10px] text-sky-300 hover:text-sky-200 px-1.5 py-1 rounded bg-sky-950/60 hover:bg-sky-900 border border-sky-900 transition-colors disabled:opacity-50"
+                title="📈 快速回测：用主页面同款真实回测引擎（月度再平衡 + 缓冲带 + 交易成本）跑该组合的全历史业绩，输出 CAGR/夏普/回撤/卡尔玛"
+              >
+                <LineChart className="w-3 h-3" />
+                <span>{quickBusy === 'A' ? '回测中…' : '快速回测'}</span>
+              </button>
               <div className="text-right font-mono pl-2 border-l border-slate-800">
                 <div className="text-xs text-slate-400">总持仓市值</div>
                 <div className="text-emerald-400 font-bold text-base">
@@ -1133,6 +1174,57 @@ export const CustomPortfolioDiagnosticPanel: React.FC<Props> = ({ universe, sett
               </div>
             </div>
           </div>
+
+          {/* 快速回测结果条 */}
+          {quickResult?.slot === 'A' && (
+            <div
+              className={`px-3 py-2 rounded-lg border flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px] font-mono ${
+                quickResult.result.ok
+                  ? 'bg-sky-950/40 border-sky-900/60'
+                  : 'bg-rose-950/40 border-rose-900/60'
+              }`}
+            >
+              {quickResult.result.ok ? (
+                <>
+                  <span className="text-sky-300 font-bold">📈 快速回测（Carver 受保护口径）</span>
+                  <span className="text-slate-400">
+                    {quickResult.result.startDate} ~ {quickResult.result.endDate} ·{' '}
+                    {quickResult.result.totalPoints} 交易日 · {quickResult.result.tradableCount} 腿可交易
+                  </span>
+                  <span className="text-slate-300">
+                    CAGR{' '}
+                    <b className={quickResult.result.cagrPct >= 0 ? 'text-rose-400' : 'text-emerald-400'}>
+                      {quickResult.result.cagrPct >= 0 ? '+' : ''}
+                      {quickResult.result.cagrPct.toFixed(2)}%
+                    </b>
+                  </span>
+                  <span className="text-slate-300">
+                    年化波动 <b className="text-slate-100">{quickResult.result.annVolPct.toFixed(2)}%</b>
+                  </span>
+                  <span className="text-slate-300">
+                    夏普{' '}
+                    <b className={quickResult.result.sharpe >= 1 ? 'text-emerald-400' : 'text-amber-400'}>
+                      {quickResult.result.sharpe.toFixed(2)}
+                    </b>
+                  </span>
+                  <span className="text-slate-300">
+                    最大回撤{' '}
+                    <b className="text-emerald-400">{quickResult.result.maxDrawdownPct.toFixed(2)}%</b>
+                  </span>
+                  <span className="text-slate-300">
+                    卡尔玛{' '}
+                    <b className={quickResult.result.calmar >= 0.5 ? 'text-emerald-400' : 'text-amber-400'}>
+                      {quickResult.result.calmar.toFixed(2)}
+                    </b>
+                  </span>
+                </>
+              ) : (
+                <span className="text-rose-300">
+                  ⚠️ 回测未完成：{quickResult.result.message || '未知原因'}（组合需全部标的都有池内行情）
+                </span>
+              )}
+            </div>
+          )}
 
           {/* 明细列表 */}
           <div className="flex flex-col gap-2 max-h-[380px] overflow-y-auto pr-1">
@@ -1231,6 +1323,15 @@ export const CustomPortfolioDiagnosticPanel: React.FC<Props> = ({ universe, sett
                 <Wand2 className="w-3 h-3 text-slate-400" />
                 <span>静态满仓配平</span>
               </button>
+              <button
+                onClick={() => handleQuickBacktest(portfolioB.id)}
+                disabled={quickBusy !== null}
+                className="flex items-center gap-1 text-[10px] text-sky-300 hover:text-sky-200 px-1.5 py-1 rounded bg-sky-950/60 hover:bg-sky-900 border border-sky-900 transition-colors disabled:opacity-50"
+                title="📈 快速回测：用主页面同款真实回测引擎（月度再平衡 + 缓冲带 + 交易成本）跑该组合的全历史业绩，输出 CAGR/夏普/回撤/卡尔玛"
+              >
+                <LineChart className="w-3 h-3" />
+                <span>{quickBusy === 'B' ? '回测中…' : '快速回测'}</span>
+              </button>
               <div className="text-right font-mono pl-2 border-l border-slate-800">
                 <div className="text-xs text-slate-400">总持仓市值</div>
                 <div className="text-emerald-400 font-bold text-base">
@@ -1239,6 +1340,57 @@ export const CustomPortfolioDiagnosticPanel: React.FC<Props> = ({ universe, sett
               </div>
             </div>
           </div>
+
+          {/* 快速回测结果条 */}
+          {quickResult?.slot === 'B' && (
+            <div
+              className={`px-3 py-2 rounded-lg border flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px] font-mono ${
+                quickResult.result.ok
+                  ? 'bg-sky-950/40 border-sky-900/60'
+                  : 'bg-rose-950/40 border-rose-900/60'
+              }`}
+            >
+              {quickResult.result.ok ? (
+                <>
+                  <span className="text-sky-300 font-bold">📈 快速回测（Carver 受保护口径）</span>
+                  <span className="text-slate-400">
+                    {quickResult.result.startDate} ~ {quickResult.result.endDate} ·{' '}
+                    {quickResult.result.totalPoints} 交易日 · {quickResult.result.tradableCount} 腿可交易
+                  </span>
+                  <span className="text-slate-300">
+                    CAGR{' '}
+                    <b className={quickResult.result.cagrPct >= 0 ? 'text-rose-400' : 'text-emerald-400'}>
+                      {quickResult.result.cagrPct >= 0 ? '+' : ''}
+                      {quickResult.result.cagrPct.toFixed(2)}%
+                    </b>
+                  </span>
+                  <span className="text-slate-300">
+                    年化波动 <b className="text-slate-100">{quickResult.result.annVolPct.toFixed(2)}%</b>
+                  </span>
+                  <span className="text-slate-300">
+                    夏普{' '}
+                    <b className={quickResult.result.sharpe >= 1 ? 'text-emerald-400' : 'text-amber-400'}>
+                      {quickResult.result.sharpe.toFixed(2)}
+                    </b>
+                  </span>
+                  <span className="text-slate-300">
+                    最大回撤{' '}
+                    <b className="text-emerald-400">{quickResult.result.maxDrawdownPct.toFixed(2)}%</b>
+                  </span>
+                  <span className="text-slate-300">
+                    卡尔玛{' '}
+                    <b className={quickResult.result.calmar >= 0.5 ? 'text-emerald-400' : 'text-amber-400'}>
+                      {quickResult.result.calmar.toFixed(2)}
+                    </b>
+                  </span>
+                </>
+              ) : (
+                <span className="text-rose-300">
+                  ⚠️ 回测未完成：{quickResult.result.message || '未知原因'}（组合需全部标的都有池内行情）
+                </span>
+              )}
+            </div>
+          )}
 
           {/* 明细列表 */}
           <div className="flex flex-col gap-2 max-h-[380px] overflow-y-auto pr-1">

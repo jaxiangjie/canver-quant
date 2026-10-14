@@ -491,7 +491,40 @@ export async function runQuickPortfolioBacktest(
     };
   }
 
-  const res = runRealBacktest(resolved, settings);
+  // /api/ashare/instruments 已 strip bars 瘦身（17MB → 200KB）：catalog 里的 bars
+  // 为空或伪随机合成线（syntheticBars），直接跑回测会得到空 series。
+  // 真实 K 线经 /api/ashare/bars/:code 按需拉取补齐（与回测沙盘/风险贡献图同款链路）。
+  const { AShareDataService } = await import('./apiClient');
+  const withBars: AShareInstrument[] = [];
+  for (const inst of resolved) {
+    const hasReal = Array.isArray(inst.bars) && inst.bars.length >= 20 && !inst.syntheticBars;
+    if (hasReal) {
+      withBars.push(inst);
+      continue;
+    }
+    const bars = await AShareDataService.fetchInstrumentBars(inst.code);
+    withBars.push({ ...inst, bars, syntheticBars: bars.length >= 20 ? false : true });
+  }
+  const tradable = withBars.filter(
+    (i) => Array.isArray(i.bars) && i.bars.length >= 20 && !i.syntheticBars,
+  ).length;
+  if (!tradable) {
+    return {
+      ok: false,
+      message: '所有标的的真实 K 线均拉取失败（/api/ashare/bars），无法回测',
+      totalPoints: 0,
+      startDate: '',
+      endDate: '',
+      cagrPct: 0,
+      annVolPct: 0,
+      sharpe: 0,
+      maxDrawdownPct: 0,
+      calmar: 0,
+      tradableCount: 0,
+    };
+  }
+
+  const res = runRealBacktest(withBars, settings);
   const m = res.metrics.carver;
   return {
     ok: true,
@@ -503,7 +536,7 @@ export async function runQuickPortfolioBacktest(
     sharpe: m.sharpe,
     maxDrawdownPct: m.maxDrawdownPct,
     calmar: m.calmar,
-    tradableCount: resolved.length,
+    tradableCount: tradable,
   };
 }
 
