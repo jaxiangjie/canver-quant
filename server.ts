@@ -23,12 +23,12 @@ import {
   mergeStores,
 } from './src/services/persistence';
 import { syncAllInstruments } from './src/services/liveMarketSync';
-import { enrichUniverseValuation, loadValuationSeries } from './src/services/valuationStore';
-import {
-  fetchToStaging,
-  listStaging,
-  promoteFromStaging,
-  type StagingTarget,
+import { enrichUniverseValuation, loadValuationSeries } from './src/services/valuationStore';
+import {
+  fetchToStaging,
+  listStaging,
+  promoteFromStaging,
+  type StagingTarget,
 } from './src/services/stagingData';
 
 // In-memory data store for A-Share instruments (real parquet data if available, else mock)
@@ -399,42 +399,10 @@ app.post('/api/ashare/proxy', async (req, res) => {
   }
 });
 
-// 数据湖自动巡检定时任务框架 (Data Sentinel Framework)
-// 目前仅预留框架结构与手动巡检接口，默认未开启自动调度器
-export interface DataSentinelReport {
-  lastCheckTime: string;
-  totalParquetFiles: number;
-  corruptedFiles: string[];
-  anomalousVolCount: number;
-  status: 'HEALTHY' | 'WARNING' | 'ERROR';
-}
-
-let lastSentinelReport: DataSentinelReport = {
-  lastCheckTime: new Date().toISOString(),
-  totalParquetFiles: 22,
-  corruptedFiles: [],
-  anomalousVolCount: 0,
-  status: 'HEALTHY',
-};
-
-export function runDataSentinelCheck(): DataSentinelReport {
-  const anomalies: string[] = [];
-  let anomalousVol = 0;
-  instrumentsStore.forEach((inst) => {
-    if (typeof inst.annualizedVol === 'number' && (inst.annualizedVol < 0.02 || inst.annualizedVol > 0.80)) {
-      anomalousVol++;
-    }
-  });
-
-  lastSentinelReport = {
-    lastCheckTime: new Date().toISOString(),
-    totalParquetFiles: instrumentsStore.length,
-    corruptedFiles: anomalies,
-    anomalousVolCount: anomalousVol,
-    status: anomalousVol > 0 ? 'WARNING' : 'HEALTHY',
-  };
-  return lastSentinelReport;
-}
+// 数据湖巡检 (Data Sentinel)——真实实现迁至 src/services/dataSentinel.ts（2026-10-14，tribunal V18）。
+// 入口文件不再 export 业务符号（旧版从启动即执行的入口 export 函数，import 即起服务器）。
+// 预留框架：默认不启动自动调度器，仅手动触发 + /api/health 暴露最近一次报告（未运行时为 UNKNOWN）。
+import { runDataSentinelCheck, getSentinelReport } from './src/services/dataSentinel';
 
 app.get('/api/health', (_req, res) => {
   const fallbackCount = instrumentsStore.filter((i: any) => i?.dataSource === 'fallback').length;
@@ -458,15 +426,17 @@ app.get('/api/health', (_req, res) => {
     stalenessDays, // parquet 最新 bar 距今天数（>3 提示重建）
     dataSentinel: {
       frameworkEnabled: true,
-      schedulerActive: false, // 遵循用户要求：预留框架，暂不启动自动定时
-      lastReport: lastSentinelReport,
+      schedulerActive: false, // 预留框架，暂不启动自动定时
+      lastReport: getSentinelReport(), // 未运行过时为 UNKNOWN（不拿硬编码 HEALTHY 谎报）
     },
   });
 });
 
-// 手动触发巡检接口（支持预留框架按需调用）
+// 手动触发巡检接口（真实扫描 data/parquet/daily：PAR1 magic + 可读性 + vol 越界单列）
 app.post('/api/ashare/sentinel/check', (_req, res) => {
-  const rep = runDataSentinelCheck();
+  const rep = runDataSentinelCheck(
+    instrumentsStore.map((i: any) => ({ code: i.code, annualizedVol: i.annualizedVol })),
+  );
   res.json({ success: true, report: rep });
 });
 

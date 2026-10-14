@@ -21,3 +21,6 @@ data/*
 !.env.example
 # 本地验收/诊断脚本与截图（CDP 验收工具产物）
 logs/
+
+# WorkBuddy 项目记忆/技能目录（本机数据，不入库）
+.workbuddy/

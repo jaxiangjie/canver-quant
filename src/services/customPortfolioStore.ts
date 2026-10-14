@@ -104,9 +104,23 @@ export function saveAllPortfolios(portfolios: CustomPortfolio[]): void {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ portfolios: userPortfolios }),
+      signal: AbortSignal.timeout(8000),
     }).catch(() => {
       /* offline / server down：本地已保存，静默降级 */
     });
+  } catch {
+    /* ignore */
+  }
+}
+
+/**
+ * 只写 localStorage（不回 POST 服务端）——用于「合并服务端数据」这类本来就来自
+ * 服务端的路径（2026-10-14，tribunal Ec1/i4）：回 POST 会造成无谓的项目内文件
+ * 写入，且与编辑路径的双写交叠时 last-arrival-wins 可能吞掉一侧的修改。
+ */
+export function saveAllPortfoliosLocalOnly(portfolios: CustomPortfolio[]): void {
+  try {
+    localStorage.setItem(PORTFOLIO_COLLECTION_STORAGE_KEY, JSON.stringify(portfolios));
   } catch {
     /* ignore */
   }
@@ -117,7 +131,7 @@ export const IMPORTED_BUNDLE_ID = 'imported';
 
 export interface PortfolioImportResult {
   ok: boolean;
-  /** 无数据标的清单（含 CASH 占位）——阻止导入的依据 */
+  /** 无数据标的清单（池外标的）——阻止导入的依据。CASH 不在此列：已被剔除并折算为现金垫（2026-10-13 语义修正） */
   missing: string[];
   bundle?: InstrumentBundle;
 }
@@ -125,9 +139,10 @@ export interface PortfolioImportResult {
 /**
  * 自选组合 -> 主页面 InstrumentBundle 转换（诊断面板「导入主页面」用）。
  *
- * 规则（2026-10-13 与用户确认）：
- * - 含任何无数据标的（不在官方 catalog 的池外标的 / CASH 占位）-> 阻止导入，
- *   返回 missing 清单（诚实性：无数据不降级、不静默剔除改变组合语义）；
+ * 规则（2026-10-13 与用户确认；2026-10-14 CASH 语义修正，tribunal Ec4/i7）：
+ * - 含池外无数据标的（不在官方 catalog）-> 阻止导入，返回 missing 清单
+ *   （诚实性：无数据不降级、不静默剔除改变组合语义）；
+ * - CASH 现金占位：剔除并折算为主页面「现金垫」，不阻止导入（纯 CASH 组合仍阻止）；
  * - 权重：全部条目显式设置了 riskBudgetWeight 则归一化使用；否则按 amount 占比归一
  *   （金额占比 ~= 风险贡献占比的合理近似）；
  * - 现持仓不回填（选项 C）：导入的是「理想仓位结构」，主页面 currentShares=0，
@@ -202,7 +217,8 @@ export function portfolioToBundle(
 /** 拉取服务端持久化的自选组合库（data/portfolios/custom_portfolios.json） */
 export async function fetchServerPortfolios(): Promise<CustomPortfolio[]> {
   try {
-    const res = await fetch('/api/ashare/portfolios');
+    // 超时保护（2026-10-14，tribunal Fc3）：服务端挂起时旧版会让挂载 effect 永远等待
+    const res = await fetch('/api/ashare/portfolios', { signal: AbortSignal.timeout(8000) });
     if (!res.ok) return [];
     const data = await res.json();
     return Array.isArray(data?.portfolios) ? data.portfolios : [];
@@ -213,12 +229,20 @@ export async function fetchServerPortfolios(): Promise<CustomPortfolio[]> {
 
 /**
  * 合并本地与服务端组合库：按 id 去重，updatedAt 较新者胜（单用户场景的简单时钟策略）。
+ * 时间比较用 Date.parse 数值比较（2026-10-14 修正，tribunal Fc3）：旧版是
+ * `String(a) > String(b)` 字典序比较——'...00.000Z' 与 '...00Z' 同刻却因 '.'(0x2E)<'Z'(0x5A)
+ * 让更精确的时间戳输掉，手写/异格式时间戳比较结果任意，缺失 updatedAt 永不能胜出。
+ * 解析失败按 0 计（最早），并在两侧都缺失时保留先到者（local 先 put）。
  */
 export function mergePortfolios(local: CustomPortfolio[], server: CustomPortfolio[]): CustomPortfolio[] {
+  const tsOf = (p: CustomPortfolio): number => {
+    const t = Date.parse(p?.updatedAt || '');
+    return Number.isFinite(t) ? t : 0;
+  };
   const byId = new Map<string, CustomPortfolio>();
   const put = (p: CustomPortfolio) => {
     const existing = byId.get(p.id);
-    if (!existing || String(p.updatedAt || '') > String(existing.updatedAt || '')) byId.set(p.id, p);
+    if (!existing || tsOf(p) > tsOf(existing)) byId.set(p.id, p);
   };
   local.forEach(put);
   server.forEach(put);
@@ -242,10 +266,19 @@ export function calculateRiskParityAllocation(
   totalCapital: number
 ): Map<string, number> {
   const result = new Map<string, number>();
-  if (!items.length || totalCapital <= 0) return result;
+  // 入参校验（2026-10-14 修正，tribunal Fc2）：NaN/Infinity 资金直接早退并显式置 0——
+  // NaN 曾穿过 `totalCapital<=0` 与 `sumInv<=0` 两道守卫（NaN 比较恒 false），
+  // 使整张分配表静默变成 NaN，再被调用方 `?? it.amount` 洗成假成功。
+  if (!items.length) return result;
+  if (!Number.isFinite(totalCapital) || totalCapital <= 0) {
+    items.forEach(it => result.set(it.id, 0));
+    return result;
+  }
 
   // 权重正比于 1 / Vol；CASH 现金占位不参与（清 0，语义=不留现金）。
   // vol 下限 0.05（国债ETF 实测水平）：防未知 vol/超低波项权重爆炸。
+  // vol 校验（tribunal Fc2）：NaN/Infinity/负数/未定义一律落到 0.25 默认值——
+  // Math.max(0.05, NaN)=NaN 会污染全表；负 vol 被 Math.max 压到 0.05 反而拿最大权重。
   const participable = items.filter(it => it.code !== 'CASH');
   if (!participable.length) {
     // 组合只有现金占位：无权益可配，全部置 0（调用方应提示用户先添加标的）
@@ -254,7 +287,10 @@ export function calculateRiskParityAllocation(
   }
 
   const invVols = participable.map(it => {
-    const vol = Math.max(0.05, it.annualizedVol ?? 0.25);
+    const vol =
+      Number.isFinite(it.annualizedVol) && (it.annualizedVol as number) > 0
+        ? Math.max(0.05, it.annualizedVol as number)
+        : 0.25;
     return { id: it.id, invVol: 1 / vol };
   });
 
@@ -266,9 +302,13 @@ export function calculateRiskParityAllocation(
 
   // 各项按权重取整到百元；残差归 invVol 最大项，保证 sum === totalCapital 精确满仓
   let allocated = 0;
+  let maxInvVol = -Infinity;
   let maxInvVolId = invVols[0].id;
   invVols.forEach(x => {
-    if (x.invVol > (invVols.find(v => v.id === maxInvVolId)?.invVol ?? 0)) maxInvVolId = x.id;
+    if (x.invVol > maxInvVol) {
+      maxInvVol = x.invVol;
+      maxInvVolId = x.id;
+    }
     const amt = Math.round((x.invVol / sumInv) * totalCapital / 100) * 100;
     result.set(x.id, amt);
     allocated += amt;
@@ -524,8 +564,37 @@ export async function runQuickPortfolioBacktest(
     };
   }
 
-  const res = runRealBacktest(withBars, settings);
+  // 用组合自身的资金跑回测（2026-10-14 修正，tribunal Fc1/V24）：此前直接透传调用方
+  // 全局 settings（默认 totalCapital=100 万），42 万的组合按 100 万账户口径回测——
+  // maxInstrumentPositionCap/minTradeAmount/整手取整/ADV 参与率全部错位，指标却不是
+  // 这个组合的。与 calculateCarverDynamicAllocation 同款覆盖范式。
+  const engineSettings: CarverSettings = {
+    ...DEFAULT_CARVER_SETTINGS,
+    ...settings,
+    totalCapital: portfolio.totalCapital,
+  };
+
+  const res = runRealBacktest(withBars, engineSettings);
   const m = res.metrics.carver;
+  // 样本量闸门（2026-10-14 修正，tribunal Fc5）：bars>=20 曾让 20~251 根的退化样本
+  // 通过出口检查，computeMetrics 在空/坍缩净值轴上返回全 0，函数却报 ok:true——
+  // UI 把「样本不足」渲染成绿色的「CAGR +0.00%」。回测引擎默认需要 252 根历史，
+  // 这里要求至少 60 个交易日净值点才承认指标可信，否则明确失败。
+  if (res.series.length < 60) {
+    return {
+      ok: false,
+      message: `样本不足：仅 ${res.series.length} 个交易日净值点（回测引擎需 252 根历史/标），指标不可信，未展示`,
+      totalPoints: res.series.length,
+      startDate: res.metrics.startDate,
+      endDate: res.metrics.endDate,
+      cagrPct: 0,
+      annVolPct: 0,
+      sharpe: 0,
+      maxDrawdownPct: 0,
+      calmar: 0,
+      tradableCount: tradable,
+    };
+  }
   return {
     ok: true,
     totalPoints: res.series.length,

@@ -2,7 +2,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { existsSync, readFileSync } from 'node:fs';
 import { AShareInstrument, AShareBar } from '../types/ashare';
-import { INITIAL_INSTRUMENTS } from './mockData';
+import { INITIAL_INSTRUMENTS } from './mockData';
 import { registryToTemplates, getHfqToMarketFactors } from './stagingData';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -86,6 +86,9 @@ export async function loadRealUniverse(): Promise<AShareInstrument[]> {
     console.log(`[real-data] registry: +${registryTemplates.length} 晋升标的扩展 catalog`);
   }
   const allTemplates = [...INITIAL_INSTRUMENTS, ...registryTemplates];
+  // registry（staging 晋升）标的识别：其 amount 是伪成交额（volShares×close），
+  // vwapAt 会恒等于 close，VWAP 甄别在数学上不可用——必须显式跳过而不是让检测器自证清白。
+  const registryIdSet = new Set(registryTemplates.map((t) => t.id));
 
   for (const tpl of allTemplates) {
     const code = stripSuffix(tpl.code);
@@ -128,11 +131,13 @@ export async function loadRealUniverse(): Promise<AShareInstrument[]> {
     const LIMIT_UP_ERA_START = '1996-12-16';
     const RATIO_DRIFT = 0.15;
     const RATIO_WINDOW = 10;
+    const isRegistrySource = registryIdSet.has(tpl.id); // 伪成交额源：无独立 VWAP 锚
     const vwapAt: number[] = [];
     for (let i = 0; i < n; i++) {
       const vol = Number(rows[i].volume);
       const amt = Number(rows[i].amount);
-      vwapAt.push(vol > 0 && amt > 0 ? amt / vol : 0);
+      // registry 源不喂 vwap（amount 是 vol×close 的合成值，喂了就是让检测器验证自己的输入）
+      vwapAt.push(vol > 0 && amt > 0 && !isRegistrySource ? amt / vol : 0);
     }
     const medianOf = (xs: number[]): number => {
       if (!xs.length) return 0;
@@ -158,10 +163,18 @@ export async function loadRealUniverse(): Promise<AShareInstrument[]> {
       const ratioBefore = medianOf(before);
       const ratioAfter = medianOf(after);
       let factor = 0;
+      let skipReason = '';
       if (ratioBefore > 0 && ratioAfter > 0 && Math.abs(ratioAfter / ratioBefore - 1) > RATIO_DRIFT) {
         factor = ratioBefore / ratioAfter; // 复权基准被切换：缩回断裂前基准
       } else if (before.length === 0 || after.length === 0) {
-        factor = pc / closes[i]; // VWAP 缺失兜底：假设断裂当日真实收益约 0
+        // VWAP 缺失/不可用（2026-10-14 修正，tribunal V5）：不再假设"当日收益约 0"捏造 factor。
+        // 旧写法 factor=pc/closes[i] 在 guard 收紧到 ±5% 后，对任何 |r|>12% 的候选必然穿过闸门，
+        // 把缺 amount 的合法涨跌停/停牌日抹成平盘并级联篡改后续全部历史——数据缺失必须 fail-loud，不能 fail-open。
+        skipReason = isRegistrySource
+          ? '该标的为 staging 晋升源（合成成交额，无独立 VWAP 锚），无法甄别，保守不动作'
+          : '断裂前后 VWAP 窗口缺失（amount 数据缺或为零），无法甄别，保守不动作';
+      } else {
+        skipReason = 'VWAP 同向跳动，判为合法极端波动';
       }
       // guard：仅排除 |factor-1|<5% 的噪声（前后窗口中位数已平滑单日 VWAP 偏离）。
       // 注意不能沿用 1.5 倍大阈——510300 分红除权断裂 factor≈1.25 正是要修的对象。
@@ -185,7 +198,7 @@ export async function loadRealUniverse(): Promise<AShareInstrument[]> {
       } else {
         console.warn(
           `[real-data] ⚠️ ${tpl.name || tpl.id} 疑似复权断裂 ${normDate(rows[i].date)} ` +
-            `(${(r * 100).toFixed(0)}%)，但 VWAP 同向跳动——判为合法极端波动，未重标定，请人工核实`,
+            `(${(r * 100).toFixed(0)}%)：${skipReason}，未重标定，请人工核实`,
         );
       }
     }

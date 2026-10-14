@@ -9,6 +9,7 @@ import {
 } from './services/carverEngine';
 import { AShareDataService } from './services/apiClient';
 import { Header } from './components/Header';
+import { ErrorBoundary } from './components/ErrorBoundary';
 import { PortfolioSummary } from './components/PortfolioSummary';
 import { CarverPositionSizer } from './components/CarverPositionSizer';
 import { AddInstrumentModal } from './components/AddInstrumentModal';
@@ -316,6 +317,7 @@ export default function App() {
           />
         )}
 
+        <ErrorBoundary name="定仓工作台模块">
         <Suspense fallback={
           <div className="flex flex-col items-center justify-center p-16 text-slate-400 font-mono gap-3">
             <div className="w-6 h-6 border-2 border-emerald-500 border-t-transparent rounded-full animate-spin" />
@@ -375,6 +377,7 @@ export default function App() {
             <DocumentationCenter />
           )}
         </Suspense>
+        </ErrorBoundary>
       </main>
 
       {/* 实时行情同步状态悬浮提示 */}

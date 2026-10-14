@@ -80,7 +80,15 @@ function ensureDirs(target: StagingTarget): string {
   return dir;
 }
 
-/** 腾讯 hfq 日线分页拉取（每页 640 根，按 end_date 向历史回溯），返回按日期升序的全历史 */
+/**
+ * 腾讯 hfq 日线分页拉取（每页 640 根，按 end_date 向历史回溯），返回按日期升序的全历史。
+ *
+ * 协议（2026-10-14 修正，tribunal V2）：`param={symbol},day,<start>,,<count>,hfq`
+ * ——第三槽是 start、第四槽才是 end。此前把回溯游标 endDate 放进 start 槽，第 2 页
+ * 请求的是「从 earliest 起向后 640 根」即已拉过的窗口，自带熔断立刻触发，任何
+ * >640 根的股票最多 2 次请求只拿到 ~640 根（"全历史"是装饰）。现在游标放第四槽，
+ * 并断言第 2 页起必须引入严格更早的新日期，否则抛错——协议错配必须炸响。
+ */
 export async function fetchTencentHfqDaily(
   code: string,
   maxBars = 12000,
@@ -91,10 +99,19 @@ export async function fetchTencentHfqDaily(
   const PAGE = 640;
 
   for (let page = 0; page < Math.ceil(maxBars / PAGE); page++) {
+    // start 槽留空；endDate 为空时 end 槽也空（= 最新 PAGE 根）
     const url =
       'https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?param=' +
-      `${symbol},day,${endDate ? endDate : ''},,${PAGE},hfq`;
-    const res = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0' } });
+      `${symbol},day,,${endDate},${PAGE},hfq`;
+    let res: Response;
+    try {
+      res = await fetch(url, {
+        headers: { 'User-Agent': 'Mozilla/5.0' },
+        signal: AbortSignal.timeout(15_000),
+      });
+    } catch (e: any) {
+      throw new Error(`tencent hfq 第 ${page + 1} 页网络失败（已收集 ${collected.size} 根）: ${e?.message || e}`);
+    }
     if (!res.ok) throw new Error(`tencent hfq http ${res.status}`);
     const j: any = await res.json();
     const data = j?.data?.[symbol];
@@ -102,6 +119,7 @@ export async function fetchTencentHfqDaily(
     const arr: any[] = data.hfqday || data.day || [];
     if (!arr.length) break;
 
+    const before = collected.size;
     for (const row of arr) {
       // 行格式 [date, open, close, high, low, volume(手), ...]
       const d = String(row[0]).slice(0, 10);
@@ -126,8 +144,27 @@ export async function fetchTencentHfqDaily(
 
     const dates = arr.map((r) => String(r[0]).slice(0, 10)).sort();
     const earliest = dates[0];
-    if (arr.length < PAGE || (endDate && earliest >= endDate)) break;
+    // 回溯页（page>=1）必须引入严格更早的新日期；否则说明游标协议错配，炸响而不是静默截断
+    if (page >= 1 && endDate) {
+      if (earliest >= endDate) {
+        throw new Error(
+          `tencent hfq 分页协议异常：第 ${page + 1} 页 earliest=${earliest} 未早于游标 ${endDate}，` +
+            '游标槽位或接口行为已变化，拒绝静默截断',
+        );
+      }
+      if (collected.size === before) {
+        throw new Error(
+          `tencent hfq 分页协议异常：第 ${page + 1} 页未引入任何新日期（earliest=${earliest}），` +
+            '疑似拿到已拉过的窗口',
+        );
+      }
+    }
+    if (arr.length < PAGE) break;
     endDate = earliest; // 向更早回溯
+    // 页间礼貌间隔，降低被腾讯限流的概率
+    if (page < Math.ceil(maxBars / PAGE) - 1) {
+      await new Promise((r) => setTimeout(r, 300));
+    }
   }
 
   if (!collected.size) throw new Error('tencent hfq 拉取为空（接口限流或代码无效）');
@@ -155,11 +192,17 @@ export async function fetchTencentQuote(code: string): Promise<TencentQuote> {
   if (!m) throw new Error('tencent quote 解析失败');
   const p = m[1].split('~');
   const num = (i: number) => Number(p[i]) || 0;
+  // p[30] 形如 '20261009150000'——须插横线成 '2026-10-09'（2026-10-14 修正：此前 slice(0,10) 得 '2026100915' 非日期）
+  const timeStr = p[30] || '';
+  const tradeDate =
+    timeStr.length >= 8
+      ? `${timeStr.slice(0, 4)}-${timeStr.slice(4, 6)}-${timeStr.slice(6, 8)}`
+      : new Date().toISOString().slice(0, 10);
   return {
     name: p[1] || code,
     currentPrice: num(3),
     preClose: num(4),
-    tradeDate: (p[30] || '').slice(0, 10),
+    tradeDate,
     peTTM: num(39),
     pb: num(46),
   };
@@ -172,9 +215,10 @@ export interface BreakFinding {
 }
 
 /**
- * 复权断裂检测 + VWAP 甄别重标定——阈值与 realData.ts 完全一致（12%/15%/guard 1.05）。
- * 对 staging 数据（伪成交额）VWAP==close，甄别退化为 warn-only；若上游换源提供真实
- * amount，本函数自动恢复完整甄别能力（语义分层：detectBreaks=候选筛，VWAP=判定器）。
+ * 复权断裂检测 + VWAP 甄别重标定——阈值与 realData.ts 一致（12%/15%/guard 0.95-1.05）。
+ * 注意（2026-10-14 修正，tribunal V5/V6）：staging 源的 amount 是伪成交额（volShares×close），
+ * vwapOf≡close、close/vwap 比值恒为 1，VWAP 甄别在数学上不可用——本函数对 staging 数据
+ * 只做候选检测 + warn-only，不捏造 factor。上游若换源提供真实 amount，甄别自动恢复。
  */
 export function detectAndFixBreaks(bars: StagingBar[]): {
   bars: StagingBar[];
@@ -215,9 +259,9 @@ export function detectAndFixBreaks(bars: StagingBar[]): {
     let factor = 0;
     if (ratioBefore > 0 && ratioAfter > 0 && Math.abs(ratioAfter / ratioBefore - 1) > RATIO_DRIFT) {
       factor = ratioBefore / ratioAfter;
-    } else if (before.length === 0 || after.length === 0) {
-      factor = pc / bars[i].close;
     }
+    // 与 realData.ts 同步：VWAP 窗口缺失时不再假设"当日收益约 0"捏造 factor——
+    // guard 收紧后该兜底会腐蚀合法数据，一律 warn-only（fail-loud）。
     if (factor > 0 && (factor < 0.95 || factor > 1.05)) {
       for (let j = i; j < bars.length; j++) {
         bars[j].open *= factor;
