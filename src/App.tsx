@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo, lazy, Suspense } from 'react';
+import React, { useState, useEffect, useMemo, useRef, lazy, Suspense } from 'react';
 import { 
   AShareInstrument, 
   CarverSettings 
@@ -7,7 +7,7 @@ import {
   DEFAULT_CARVER_SETTINGS, 
   calculatePortfolio 
 } from './services/carverEngine';
-import { AShareDataService } from './services/apiClient';
+import { AShareDataService, barSyncNotice } from './services/apiClient';
 import { Header } from './components/Header';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { PortfolioSummary } from './components/PortfolioSummary';
@@ -85,6 +85,9 @@ export default function App() {
 
   const [isSyncingLatest, setIsSyncingLatest] = useState(false);
   const [syncToast, setSyncToast] = useState<{ type: 'success' | 'info' | 'error'; message: string } | null>(null);
+  // 连点闸门（2026-10-15）：setIsSyncingLatest 是异步的，两次极快的点击都会读到 false →
+  // 会发出两个请求。用 ref 做同步互斥，重复点击直接不发请求（用户要求：本地已更新就别再发）。
+  const syncInFlightRef = useRef(false);
 
   // 计算当前数据宇宙的最大实际交易日
   const latestTradeDate = useMemo(() => {
@@ -103,13 +106,19 @@ export default function App() {
           .then(syncRes => {
             if (syncRes.instruments?.length) {
               setUniverse(syncRes.instruments);
-              if (syncRes.report.updatedCount > 0) {
+              // 自动同步保持安静，但「日线这次没同步上」必须让用户看见（否则会拿旧 K 线调仓）
+              const bar = barSyncNotice(syncRes.barReport);
+              if (bar?.type === 'error') {
+                setSyncToast({ type: 'error', message: `自动同步：${bar.message}` });
+              } else if (syncRes.report.updatedCount > 0 || bar?.type === 'success') {
                 setSyncToast({
                   type: 'info',
-                  message: `已自动增量同步至最新交易日: ${syncRes.report.latestTradingDate} (${syncRes.report.updatedCount} 只标的更新)`,
+                  message: `已自动增量同步至 ${syncRes.report.latestTradingDate} · ${bar?.message || ''}`,
                 });
-                setTimeout(() => setSyncToast(null), 4000);
+              } else {
+                return;
               }
+              setTimeout(() => setSyncToast(null), 5000);
             }
           })
           .catch(e => console.warn('[App] initial sync skipped:', e));
@@ -236,17 +245,28 @@ export default function App() {
   };
 
   const handleSyncLatest = async () => {
+    // 重复点击直接丢弃（不发请求）：同步是重 IO 且会打外部行情源，连点只会招限流
+    if (syncInFlightRef.current) {
+      setSyncToast({ type: 'info', message: '同步已在进行中，请稍候…' });
+      setTimeout(() => setSyncToast(null), 2500);
+      return;
+    }
+    syncInFlightRef.current = true;
     setIsSyncingLatest(true);
     setIsRefreshing(true);
     try {
       const res = await AShareDataService.syncLatestMarketData();
       setUniverse(res.instruments);
       const rep = res.report;
+      // 快照（现价/ATR/PE）与日线 K 线是两件事，必须分别说清：
+      // 合成一句「同步成功」会在 K 线失败时把用户骗去用过期信号调仓。
+      const bar = barSyncNotice(res.barReport);
+      const snapshotLine = `快照 ${rep.updatedCount}/${rep.totalInstruments} 只 @ ${rep.latestTradingDate || '最新交易日'}`;
       setSyncToast({
-        type: 'success',
-        message: `成功同步 ${rep.updatedCount}/${rep.totalInstruments} 只标的至 ${rep.latestTradingDate || '最新交易日'}，波动率与目标仓位已自动重算！`,
+        type: bar?.type === 'error' ? 'error' : rep.updatedCount > 0 ? 'success' : 'info',
+        message: bar ? `${snapshotLine} · ${bar.message}` : snapshotLine,
       });
-      setTimeout(() => setSyncToast(null), 5000);
+      setTimeout(() => setSyncToast(null), 6000);
     } catch (err: any) {
       setSyncToast({
         type: 'error',
@@ -254,6 +274,7 @@ export default function App() {
       });
       setTimeout(() => setSyncToast(null), 5000);
     } finally {
+      syncInFlightRef.current = false;
       setIsSyncingLatest(false);
       setIsRefreshing(false);
     }

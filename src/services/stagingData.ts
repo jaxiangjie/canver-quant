@@ -106,6 +106,11 @@ function ensureDirs(target: StagingTarget): string {
 export async function fetchTencentHfqDaily(
   code: string,
   maxBars = 12000,
+  /**
+   * 增量模式：回溯到「最早日期 ≤ stopAtOrBefore」即停止翻页。
+   * 日线增量同步只需覆盖 parquet 尾部之后的缺口，避免为 3-4 根新 bar 拉全历史。
+   */
+  stopAtOrBefore?: string,
 ): Promise<StagingBar[]> {
   const symbol = codeToTencentSymbol(code);
   const collected = new Map<string, StagingBar>();
@@ -114,30 +119,42 @@ export async function fetchTencentHfqDaily(
 
   for (let page = 0; page < Math.ceil(maxBars / PAGE); page++) {
     // start 槽留空；endDate 为空时 end 槽也空（= 最新 PAGE 根）
-    const url =
-      'https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?param=' +
-      `${symbol},day,,${endDate},${PAGE},hfq`;
-    // 每页 15s 超时 + 失败重试 1 次（tribunal G2c8：旧版一次 5xx/超时就抛错，
+    // 多入口 fallback（2026-10-15 实测）：web.ifzq.gtimg.cn 在高频拉取下会返回 501
+    // （限流），而同一接口换 `ifzq.gtimg.cn`（去 web. 前缀）或 proxy.finance.qq.com 仍 200。
+    // 实测三者返回数据完全一致，故按序尝试，任一成功即用。
+    const TEN_HFQ_HOSTS = [
+      'https://ifzq.gtimg.cn/appstock/app/fqkline/get',
+      'https://web.ifzq.gtimg.cn/appstock/app/fqkline/get',
+      'https://proxy.finance.qq.com/ifzqgtimg/appstock/app/fqkline/get',
+    ];
+    const query = `${symbol},day,,${endDate},${PAGE},hfq`;
+    // 每页 15s 超时；跨入口共重试 2 轮（tribunal G2c8：旧版一次 5xx/超时就抛错，
     // 已收集的全部 bars 随内存一起丢弃，用户只能整轮重拉）
     let res: Response | null = null;
-    for (let attempt = 0; attempt < 2 && !res; attempt++) {
-      try {
-        const r = await fetch(url, {
-          headers: { 'User-Agent': 'Mozilla/5.0' },
-          signal: AbortSignal.timeout(15_000),
-        });
-        if (r.ok) res = r;
-        else if (attempt === 1) throw new Error(`tencent hfq http ${r.status}`);
-      } catch (e: any) {
-        if (attempt === 1) {
-          throw new Error(
-            `tencent hfq 第 ${page + 1} 页网络失败（已收集 ${collected.size} 根，重试 1 次后仍失败）: ${e?.message || e}`,
-          );
+    const errs: string[] = [];
+    for (let round = 0; round < 2 && !res; round++) {
+      for (const host of TEN_HFQ_HOSTS) {
+        if (res) break;
+        try {
+          const r = await fetch(`${host}?param=${query}`, {
+            headers: { 'User-Agent': 'Mozilla/5.0' },
+            signal: AbortSignal.timeout(15_000),
+          });
+          if (r.ok) res = r;
+          else errs.push(`${new URL(host).host}→http ${r.status}`);
+        } catch (e: any) {
+          errs.push(`${new URL(host).host}→${e?.message || e}`);
         }
-        await new Promise((r2) => setTimeout(r2, 1000));
+        if (!res) await new Promise((r2) => setTimeout(r2, 500));
       }
+      // 全部入口失败时退避再试一轮（限流通常是短时的）
+      if (!res && round === 0) await new Promise((r2) => setTimeout(r2, 2000));
     }
-    if (!res) throw new Error(`tencent hfq 第 ${page + 1} 页无响应`);
+    if (!res) {
+      throw new Error(
+        `tencent hfq 第 ${page + 1} 页全部入口失败（已收集 ${collected.size} 根）: ${errs.join(' | ')}`,
+      );
+    }
     const j: any = await res.json();
     const data = j?.data?.[symbol];
     if (!data) throw new Error('tencent hfq response missing data');
@@ -185,6 +202,8 @@ export async function fetchTencentHfqDaily(
       }
     }
     if (arr.length < PAGE) break;
+    // 增量模式：本页已回溯覆盖到目标日期（parquet 尾日）即可停止，无需继续向历史翻页
+    if (stopAtOrBefore && earliest <= stopAtOrBefore) break;
     endDate = earliest; // 向更早回溯
     // 页间礼貌间隔，降低被腾讯限流的概率
     if (page < Math.ceil(maxBars / PAGE) - 1) {
@@ -407,10 +426,16 @@ function inferCategory(bare: string, isETF: boolean): string {
   return 'broad_etf';
 }
 
-/** staging bars → 统一池 parquet（pyarrow，schema 与底座完全一致），成功返回 true */
-async function writeStagingToParquet(bare: string): Promise<void> {
-  const barsPath = path.join(STAGING_DIR, `${bare}_bars.json`);
-  const parquetPath = path.resolve(process.cwd(), 'data', 'parquet', 'daily', `${bare}_hfq.parquet`);
+/**
+ * bars JSON → parquet（pyarrow 脚本，原子写 + 读回逐根自校验 date epoch）。
+ * 导出供日线增量同步复用：语义 = 「把这个 JSON 的 bars 写进这个 parquet 路径」，
+ * 不关心 JSON 来自 staging 还是增量合并结果。
+ */
+export async function writeBarsJsonToParquet(
+  barsJsonPath: string,
+  parquetPath: string,
+  bare: string,
+): Promise<void> {
   const script = path.resolve(process.cwd(), 'scripts', 'staging_to_parquet.py');
   // node spawn 的 PATH 与交互 shell 不同——多候选逐个尝试（ENOENT=无此解释器，exit≠0=可能缺 pyarrow）。
   // 个人绝对路径改为从 LOCALAPPDATA 动态推导，避免把某台机器的用户名提交进源码。
@@ -426,7 +451,7 @@ async function writeStagingToParquet(bare: string): Promise<void> {
   for (const py of candidates) {
     const outcome = await new Promise<{ ok: boolean; err: string }>((resolve) => {
       try {
-        const child = spawn(py, [script, barsPath, parquetPath, bare], {
+        const child = spawn(py, [script, barsJsonPath, parquetPath, bare], {
           stdio: ['ignore', 'ignore', 'pipe'],
         });
         // 超时强杀：hung python（pyarrow 卡死/文件锁）曾能让 promote 请求永远挂起
@@ -459,6 +484,13 @@ async function writeStagingToParquet(bare: string): Promise<void> {
     lastErr = `${py} → ${outcome.err}`;
   }
   throw new Error(`staging_to_parquet.py 全部候选解释器失败：${lastErr}`);
+}
+
+/** staging bars → 统一池 parquet（pyarrow，schema 与底座完全一致），成功返回 true */
+async function writeStagingToParquet(bare: string): Promise<void> {
+  const barsPath = path.join(STAGING_DIR, `${bare}_bars.json`);
+  const parquetPath = path.resolve(process.cwd(), 'data', 'parquet', 'daily', `${bare}_hfq.parquet`);
+  await writeBarsJsonToParquet(barsPath, parquetPath, bare);
 }
 
 /**

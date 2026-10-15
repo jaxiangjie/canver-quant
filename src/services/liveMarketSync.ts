@@ -278,8 +278,21 @@ export async function syncSingleInstrument(
   // atrScale≈1 时（市价与 hfq 末收一致的 ETF）天然无操作。
   const hfqLastClose = prevBars.length > 0 ? prevBars[prevBars.length - 1].close : 0;
   const atrScale = livePrice > 0 && hfqLastClose > 0 ? livePrice / hfqLastClose : 1;
+  // ⚠️ 幂等基准（2026-10-15 实测事故）：游标基准必须取 bars 的 hfq atr20，绝不读 inst.dailyATR。
+  // inst.dailyATR 是本函数的写入目标——把它当基准就会每 sync 一次都乘一个 atrScale，
+  // 形成 f^n 累积缩放（0.312 → 0.142 → 0.065 → … → 0），ATR 趋 0 后 EWMAC 分母触底、
+  // 标量全部被钳到 ±20（用户看到「11 只全是看多/20 分」的怪象即此）。
+  const lastBarHfqATR = prevBars.length > 0 ? prevBars[prevBars.length - 1].atr20 : undefined;
+  const hfqATR =
+    typeof lastBarHfqATR === 'number' && lastBarHfqATR > 0
+      ? lastBarHfqATR
+      : inst.dailyATR > 0
+        ? inst.dailyATR
+        : 0;
+  // 兜底：bars 缺失且持久化值已损坏（≤0）时，按市价 2% 退化，避免把 0 一路传进信号与定仓。
+  const safeHfqATR = hfqATR > 0 ? hfqATR : (livePrice > 0 ? livePrice : 1) * 0.02;
   const displayATR =
-    atrScale !== 1 ? Number((inst.dailyATR * atrScale).toFixed(4)) : inst.dailyATR;
+    atrScale !== 1 ? Number((safeHfqATR * atrScale).toFixed(4)) : Number(safeHfqATR.toFixed(4));
   const updatedInstrument: AShareInstrument = {
     ...inst,
     currentPrice: livePrice > 0 ? livePrice : inst.currentPrice,

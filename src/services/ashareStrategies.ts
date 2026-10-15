@@ -142,10 +142,18 @@ function computeEWMAC(closes: number[], fastSpan: number, slowSpan: number, curr
   const slowEMA = calculateEMA(closes, slowSpan);
   
   const diff = fastEMA[fastEMA.length - 1] - slowEMA[slowEMA.length - 1];
-  const dailyVolAmount = Math.max(0.001, currentATR);
-  
+  // 价格参考优先取与 closes 同口径的最后一根收盘（currentPrice 可能是市价口径，仅作兜底）
+  const lastClose = closes[closes.length - 1];
+  const priceRef = lastClose > 0 ? lastClose : currentPrice > 0 ? currentPrice : 1;
+  // 防御（2026-10-15 事故）：ATR/价格应有合理量级（日波动约 0.2%~25%）。越界即口径错位或数据腐败
+  // （曾出现 dailyATR 被累积缩放至 0.0005 → 分母触底 → 标量全被顶到 ±20），
+  // 退化为价格 2% 的保守兜底，宁可低估趋势强度也不让腐败值伪造满仓信号。
+  let atr = Math.max(0.001, currentATR);
+  const atrRatio = atr / Math.max(0.001, priceRef);
+  if (!(atrRatio >= 0.002 && atrRatio <= 0.25)) atr = priceRef * 0.02;
+
   // Carver scalar normalization factor: typically sqrt(fast) * multiplier
-  const rawScalar = diff / dailyVolAmount;
+  const rawScalar = diff / atr;
   const scaledScalar = rawScalar * 4.2; // calibrated so standard moves fall into [-20, 20]
   
   return Math.max(-20, Math.min(20, Number(scaledScalar.toFixed(1))));
@@ -189,7 +197,16 @@ export function evaluateAShareStrategies(
   const bars = Array.isArray(instrument?.bars) ? instrument.bars : [];
   const closes = bars.map(b => b.close);
   const currentPrice = instrument?.currentPrice || 1.0;
-  const currentATR = instrument?.dailyATR || 0.05;
+  // ⚠️ EWMAC 分母口径（2026-10-15 实测事故）：closes 是 hfq 后复权序列，分母必须与之同口径。
+  // instrument.dailyATR 是「市价口径」（liveMarketSync 市价化后供 carverEngine 算目标股数），
+  // 直接拿来做分母会让无量纲比值被放大复权因子倍（f 可达 96×，福耀），标量全被钳到 ±20。
+  // 正解：优先取 bars 最后根的 hfq atr20（与 closes 同源），仅在其缺失时回退 instrument 值。
+  const barATR = bars.length > 0 ? (bars[bars.length - 1] as any).atr20 : undefined;
+  const hfqATR =
+    typeof barATR === 'number' && barATR > 0
+      ? barATR
+      : undefined;
+  const currentATR = hfqATR ?? (instrument?.dailyATR || 0.05);
 
   // 1. Carver Multi-horizon EWMAC (8/32, 16/64, 32/128)
   const ewmac8_32 = computeEWMAC(closes, 8, 32, currentATR, currentPrice);

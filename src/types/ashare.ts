@@ -43,6 +43,10 @@ export interface AShareInstrument {
   dataSource?: 'parquet' | 'fallback' | 'manual' | 'realtime_synced'; // 数据来源：parquet 真实行情 / 无数据回退模板 / 用户自定义 / 实时增量同步
   vwapPrice?: number;  // 市价近似：parquet amount/volume 的 VWAP（hfq close 含复权系数，不能直接当市价用于下单/定仓）
   syntheticBars?: boolean;  // bars 是否为合成的伪数据（无真实行情源）；回测与相关性计算应排除此类标的
+  // 服务端真实 K 线的元信息（2026-10-15）：接口为瘦身只下发 barsCount/lastBarDate 而不发 bars，
+  // 前端 bars 因此可能是合成的 —— 展示「数据时效/根数」必须用这两个字段，不能拿合成 bars 的日期冒充。
+  barsCount?: number;          // 服务端真实 K 线根数
+  lastBarDate?: string | null; // 服务端真实 K 线末根交易日（YYYY-MM-DD）
   riskBudgetWeight: number; // 目标风险预算权重 (0 - 1)
   currentShares: number;// 当前实际持有股数 (手数为 currentShares / 100)
   premiumDiscountRate?: number; // ETF二级市场折溢价率 (%)

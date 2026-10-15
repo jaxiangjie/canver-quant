@@ -23,6 +23,7 @@ import {
   mergeStores,
 } from './src/services/persistence';
 import { syncAllInstruments } from './src/services/liveMarketSync';
+import { syncDailyBars } from './src/services/dailyBarSync';
 import { enrichUniverseValuation, loadValuationSeries } from './src/services/valuationStore';
 import {
   fetchToStaging,
@@ -40,7 +41,14 @@ let instrumentsStore: any[] = [];
 // （浏览器直连同 + mock 兜底），曾造成真实行情被污染。前端按需经 /api/ashare/bars/:code 拉取 K 线。
 function stripBars(inst: any) {
   const { bars, ...rest } = inst;
-  return { ...rest, barsCount: Array.isArray(bars) ? bars.length : 0 };
+  const arr = Array.isArray(bars) ? bars : [];
+  return {
+    ...rest,
+    barsCount: arr.length,
+    // 真实末根交易日：前端 bars 是合成的（hydrateInstrument 兜底），
+    // 「最新交易日/K线总数」这类时效展示必须靠这两个字段，否则会显示成合成值的「今天」。
+    lastBarDate: arr.length ? arr[arr.length - 1].tradeDate : null,
+  };
 }
 
 app.get('/api/ashare/instruments', (_req, res) => {
@@ -319,14 +327,11 @@ app.get('/api/ashare/freshness', (_req, res) => {
 // 在线增量拉取最新交易日数据并同步 (GET)
 app.get('/api/ashare/sync-latest', async (_req, res) => {
   try {
-    const { updatedInstruments, report } = await syncAllInstruments(instrumentsStore);
-    if (updatedInstruments.length > 0) {
-      instrumentsStore = updatedInstruments;
-      savePersistedStore(instrumentsStore, 'sync-latest');
-    }
+    const out = await runBarSyncThenSnapshot(null);
     res.json({
       success: true,
-      report,
+      report: out.snapshotReport,
+      barReport: out.barReport,
       instruments: instrumentsStore.map(stripBars),
     });
   } catch (err: any) {
@@ -339,19 +344,58 @@ app.get('/api/ashare/sync-latest', async (_req, res) => {
 app.post('/api/ashare/sync-latest', async (req, res) => {
   try {
     const targetCodes: string[] | null = Array.isArray(req.body?.codes) ? req.body.codes : null;
-    let pool = instrumentsStore;
-    if (targetCodes && targetCodes.length > 0) {
-      pool = instrumentsStore.filter(i => targetCodes.includes(i.code) || targetCodes.includes(i.id));
-    }
-    const { updatedInstruments, report } = await syncAllInstruments(pool);
-    const codeMap = new Map(updatedInstruments.map(u => [u.id, u]));
-    instrumentsStore = instrumentsStore.map(i => codeMap.get(i.id) || i);
-    savePersistedStore(instrumentsStore, 'sync-latest');
-    res.json({ success: true, report, instruments: instrumentsStore.map(stripBars) });
+    const includeBars = req.body?.bars !== false; // 默认包含日线更新；bars:false 可只刷快照
+    const out = await runBarSyncThenSnapshot(targetCodes, includeBars);
+    res.json({
+      success: true,
+      report: out.snapshotReport,
+      barReport: out.barReport,
+      instruments: instrumentsStore.map(stripBars),
+    });
   } catch (err: any) {
+    console.error('[sync-latest] failed:', err);
     res.status(500).json({ success: false, message: err?.message || 'Sync failed' });
   }
 });
+
+/**
+ * 同步编排（2026-10-15）：日线增量 → 重载（指标重算）→ 快照。
+ * 顺序不可颠倒：bars 变了必须重载，否则 EWMAC/波动率/目标股数仍基于旧 K 线；
+ * 重载会重建 vwapPrice 市价兜底，随后快照再用实时价覆盖（双 owner 无害，都是「设为市价」）。
+ *
+ * 「本地已更新就跳过重复点击」的闸门放在 syncDailyBars 内部（数据判据，非时间窗）：
+ * 本地末根 ≥ 最近已收盘工作日 → 整轮零网络请求。这里不再自带 30s 时间窗，
+ * 否则会出现「明明有新交易日却被时间窗压住」的反向错误。
+ */
+async function runBarSyncThenSnapshot(
+  codes: string[] | null,
+  includeBars = true,
+): Promise<{ barReport: any; snapshotReport: any }> {
+  let barReport: any = null;
+  if (includeBars) {
+    barReport = await syncDailyBars(instrumentsStore, { codes: codes || undefined });
+    if (barReport.skipped) {
+      console.log(`[bar-sync] 跳过：${barReport.reason}`);
+    } else {
+      if (barReport.updated > 0) {
+        instrumentsStore = await finalizeCatalog(await loadRealUniverse());
+      }
+      console.log(
+        `[bar-sync] 日线扫描完成：updated=${barReport.updated}/${barReport.total}` +
+          `（up-to-date=${barReport.upToDate}, failed=${barReport.failed}）` +
+          (barReport.updated > 0 ? '，catalog 已重载' : ''),
+      );
+    }
+  }
+  const pool = codes && codes.length
+    ? instrumentsStore.filter((i) => codes.includes(i.code) || codes.includes(i.id))
+    : instrumentsStore;
+  const { updatedInstruments, report } = await syncAllInstruments(pool);
+  const codeMap = new Map(updatedInstruments.map((u) => [u.id, u]));
+  instrumentsStore = instrumentsStore.map((i) => codeMap.get(i.id) || i);
+  savePersistedStore(instrumentsStore, 'sync-latest');
+  return { barReport, snapshotReport: report };
+}
 
 app.post('/api/ashare/ingest', (req, res) => {
   try {

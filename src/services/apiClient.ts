@@ -6,6 +6,47 @@ import { syncAllInstruments, SyncReport } from './liveMarketSync';
 const LOCAL_STORAGE_KEY = 'carver_ashare_universe_v3';
 const DATA_CONFIG_KEY = 'carver_data_adapter_config_v1';
 
+/**
+ * 日线增量同步（K 线）报告 —— 与 src/services/dailyBarSync.ts 的 BarSyncReport 同形。
+ * 刻意在此本地声明而非 import：dailyBarSync 依赖 node 的 fs/path 与 python 子进程，
+ * 把它的模块引入浏览器端会污染打包产物。字段改动时两边需同步。
+ */
+export interface BarSyncSummary {
+  total: number;
+  updated: number;
+  upToDate: number;
+  failed: number;
+  skipped?: boolean;
+  reason?: string;
+  gateDate?: string;
+}
+
+/**
+ * 把「日线同步」结果翻成一句人话（App 悬浮提示 / 数据适配台共用，避免两处口径分叉）。
+ * 关键点：K 线没更新成功时绝不能并入快照的成功文案 —— 那会让用户拿着过期 K 线去调仓。
+ */
+export function barSyncNotice(
+  bar: BarSyncSummary | null,
+): { type: 'success' | 'info' | 'error'; message: string } | null {
+  if (!bar) return null;
+  if (bar.skipped) {
+    return { type: 'info', message: `K 线未改动：${bar.reason || '本地已是最新交易日'}` };
+  }
+  if (bar.failed > 0) {
+    return {
+      type: 'error',
+      message: `日线同步未完成：仅 ${bar.updated}/${bar.total} 只推进，${bar.failed} 只失败；本轮信号仍基于旧 K 线，请在数据适配台重试`,
+    };
+  }
+  if (bar.updated === 0) {
+    return { type: 'info', message: `日线无需更新：${bar.total} 只标的均已在最新交易日` };
+  }
+  return {
+    type: 'success',
+    message: `K 线已推进 ${bar.updated}/${bar.total} 只标的，EWMAC/波动率/目标股数已重算`,
+  };
+}
+
 function emptySyncReport(total: number): SyncReport {
   return {
     success: false,
@@ -76,6 +117,10 @@ historicalValuation: Array.isArray(raw?.historicalValuation) && raw.historicalVa
         }),
     bars,
     syntheticBars: !hasRealBars,
+    // 真实 K 线元信息透传（2026-10-15）：bars 被服务端剥离时，上面的 bars 是合成的，
+    // 展示层必须用这两个字段，不能拿合成 bars 的根数/末根日期当真实数据。
+    barsCount: Number(raw?.barsCount ?? (Array.isArray(raw?.bars) ? raw.bars.length : 0)) || undefined,
+    lastBarDate: raw?.lastBarDate ?? (hasRealBars ? raw.bars[raw.bars.length - 1].tradeDate : null),
     dataSource: raw?.dataSource ?? (hasRealBars ? 'parquet' : 'manual'),
     // 基本面健康度扩展字段透传
     roe: raw?.roe,
@@ -242,27 +287,33 @@ export class AShareDataService {
   }
 
   /**
-   * 获取当前本地/内存宇宙的最大交易日
+   * 获取当前本地/内存宇宙的最大交易日（真实口径）
+   *
+   * 优先用服务端下发的 lastBarDate：前端 bars 在「服务端瘦身」时是合成序列
+   * （hydrateInstrument 兜底生成，末根日期恒为「今天」），拿它算时效会让界面
+   * 永远显示「已是最新」。合成 bars 只在没有 lastBarDate 时兜底。
    */
   static getLatestTradeDate(instruments: AShareInstrument[]): string {
     let maxDate = '';
     for (const inst of instruments) {
-      if (Array.isArray(inst.bars) && inst.bars.length > 0) {
-        const d = inst.bars[inst.bars.length - 1].tradeDate;
-        if (d && (!maxDate || d > maxDate)) {
-          maxDate = d;
-        }
+      const d = inst.lastBarDate || (inst.syntheticBars ? '' : inst.bars?.[inst.bars.length - 1]?.tradeDate) || '';
+      if (d && (!maxDate || d > maxDate)) {
+        maxDate = d;
       }
     }
     return maxDate;
   }
 
   /**
-   * 在线增量同步最新交易日行情数据
+   * 在线增量同步最新交易日行情数据（日线 K 线 + 快照）
    * 优先通过服务端 /api/ashare/sync-latest 获取，落盘持久化；若网络或服务端离线则在客户端回退直接同步
+   *
+   * 返回的 barReport 是「日线 K 线」这一半的结果，与 report（快照字段）分开：
+   * 调用方必须分别展示，否则「K 线同步失败」会被快照成功掩盖成一句「同步成功」。
    */
   static async syncLatestMarketData(options?: { codes?: string[] }): Promise<{
     report: SyncReport;
+    barReport: BarSyncSummary | null;
     instruments: AShareInstrument[];
   }> {
     try {
@@ -277,7 +328,11 @@ export class AShareDataService {
         if (data.success && Array.isArray(data.instruments)) {
           const hydrated = data.instruments.map(hydrateInstrument);
           localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(hydrated));
-          return { report: data.report, instruments: hydrated };
+          return {
+            report: data.report,
+            barReport: data.barReport ?? null,
+            instruments: hydrated,
+          };
         }
       }
     } catch (err) {
@@ -286,12 +341,12 @@ export class AShareDataService {
       // 是真实行情被 mock/qfq 数据污染的主动手（2026-10-12 事故）。
       console.warn('[apiClient] server sync failed; keep current universe unchanged:', err);
       const current = await this.loadInstruments();
-      return { report: emptySyncReport(current.length), instruments: current };
+      return { report: emptySyncReport(current.length), barReport: null, instruments: current };
     }
 
     // 服务端返回异常（success=false）：同样保持现状，不降级直连
     const current = await this.loadInstruments();
-    return { report: emptySyncReport(current.length), instruments: current };
+    return { report: emptySyncReport(current.length), barReport: null, instruments: current };
   }
 
   /**

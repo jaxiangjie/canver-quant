@@ -1,6 +1,6 @@
-import React, { useState } from 'react';
+import React, { useState, useRef } from 'react';
 import { AShareInstrument, ExternalDataAdapterConfig } from '../types/ashare';
-import { AShareDataService } from '../services/apiClient';
+import { AShareDataService, barSyncNotice } from '../services/apiClient';
 import { SyncReport } from '../services/liveMarketSync';
 import { 
   Database, 
@@ -45,6 +45,7 @@ export const DataAdapterConsole: React.FC<DataAdapterConsoleProps> = ({
   const [syncReport, setSyncReport] = useState<SyncReport | null>(null);
   const [syncingSingleCode, setSyncingSingleCode] = useState<string | null>(null);
   const [isLocalSyncing, setIsLocalSyncing] = useState(false);
+  const singleSyncInFlightRef = useRef(false);
 
   // Daily checklist state
   const [checklist, setChecklist] = useState<Record<number, boolean>>({
@@ -70,15 +71,20 @@ export const DataAdapterConsole: React.FC<DataAdapterConsoleProps> = ({
       await onSyncLatest();
       return;
     }
+    if (singleSyncInFlightRef.current) return;
+    singleSyncInFlightRef.current = true;
     setIsLocalSyncing(true);
     setStatusMsg(null);
     try {
       const res = await AShareDataService.syncLatestMarketData();
       onUniverseUpdated(res.instruments);
       setSyncReport(res.report);
+      const bar = barSyncNotice(res.barReport);
       setStatusMsg({
-        type: 'success',
-        text: `已成功同步 ${res.report.updatedCount}/${res.report.totalInstruments} 只标的至 ${res.report.latestTradingDate || '最新交易日'}，卡弗定仓引擎已自动重算目标仓位与ATR！`,
+        type: bar?.type === 'error' ? 'error' : 'success',
+        text: `快照 ${res.report.updatedCount}/${res.report.totalInstruments} 只 @ ${res.report.latestTradingDate || '最新交易日'}${
+          bar ? ` · ${bar.message}` : ''
+        }`,
       });
     } catch (err: any) {
       setStatusMsg({
@@ -86,19 +92,25 @@ export const DataAdapterConsole: React.FC<DataAdapterConsoleProps> = ({
         text: `同步失败: ${err?.message || '网络连接超时'}`,
       });
     } finally {
+      singleSyncInFlightRef.current = false;
       setIsLocalSyncing(false);
     }
   };
 
   const handleSyncSingle = async (code: string) => {
+    // 连点闸门：状态是异步的，同一 tick 内的第二次点击拦不住，用 ref 同步互斥
+    if (singleSyncInFlightRef.current) return;
+    singleSyncInFlightRef.current = true;
     setSyncingSingleCode(code);
     setStatusMsg(null);
     try {
       const res = await AShareDataService.syncLatestMarketData({ codes: [code] });
       onUniverseUpdated(res.instruments);
+      // 单只同步同样要区分「K 线推进了」与「K 线没动」，不能一律报成功
+      const bar = barSyncNotice(res.barReport);
       setStatusMsg({
-        type: 'success',
-        text: `标的 ${code} 增量同步完成！`,
+        type: bar?.type === 'error' ? 'error' : 'success',
+        text: bar ? `标的 ${code}：${bar.message}` : `标的 ${code} 增量同步完成！`,
       });
     } catch (err: any) {
       setStatusMsg({
@@ -106,6 +118,7 @@ export const DataAdapterConsole: React.FC<DataAdapterConsoleProps> = ({
         text: `同步标的 ${code} 失败: ${err?.message}`,
       });
     } finally {
+      singleSyncInFlightRef.current = false;
       setSyncingSingleCode(null);
     }
   };
@@ -327,7 +340,8 @@ print("推送到卡弗工作台状态:", res.status_code, res.json())
                 增量行情自动补齐与 Carver 目标仓位联动机制
               </div>
               <div className="text-slate-400 text-[11px] leading-relaxed">
-                当运行策略或载入工作台时，系统将智能对比本地数据最后一根 K 线的日期与全市场最新交易日。若滞后，将自动通过公共金融通道补齐缺失交易日的真实高开低收成交量，重新滚动计算 20/60/250 日均线与 120 日年化波动率，并驱动卡弗缓冲带判定。
+                同步时系统先比对本地 parquet 末根日期与「最近已收盘交易日」：<strong className="text-slate-300">已是最新则整轮跳过，不发起任何外部请求</strong>（连点不会重复拉取）。
+                若滞后，才通过公共金融通道补齐缺失交易日的真实高开低收成交量，重新滚动计算 20/60/250 日均线与 120 日年化波动率，并驱动卡弗缓冲带判定。
               </div>
             </div>
           </div>
@@ -362,9 +376,13 @@ print("推送到卡弗工作台状态:", res.status_code, res.json())
                 </thead>
                 <tbody className="divide-y divide-slate-800/60">
                   {universe.map((inst) => {
-                    const lastBar = inst.bars?.[inst.bars.length - 1];
-                    const tradeDate = lastBar?.tradeDate || '无数据';
-                    const isUpToDate = tradeDate === latestTradeDate;
+                    // 真实性口径（2026-10-15）：服务端只下发 barsCount/lastBarDate，前端 inst.bars
+                    // 是合成序列（日期恒为「今天」）。时效列必须读 lastBarDate，否则整表永远显示「最新」。
+                    const tradeDate =
+                      inst.lastBarDate ||
+                      (inst.syntheticBars ? '' : inst.bars?.[inst.bars.length - 1]?.tradeDate) ||
+                      '无数据';
+                    const isUpToDate = !!inst.lastBarDate && tradeDate === latestTradeDate;
                     const isSingleSyncing = syncingSingleCode === inst.code;
 
                     return (
@@ -403,7 +421,7 @@ print("推送到卡弗工作台状态:", res.status_code, res.json())
                           {(inst.annualizedVol * 100).toFixed(1)}%
                         </td>
                         <td className="py-2 px-3 text-right text-slate-400">
-                          {inst.bars?.length || 0} 根
+                          {inst.barsCount ?? inst.bars?.length ?? 0} 根
                         </td>
                         <td className="py-2 px-3 text-center">
                           <span className={`px-1.5 py-0.5 rounded text-[9px] ${
