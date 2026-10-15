@@ -15,6 +15,7 @@ app.use(express.json({ limit: '20mb' }));
 
 import { INITIAL_INSTRUMENTS } from './src/services/mockData';
 import { loadRealUniverse, PARQUET_DIR } from './src/services/realData';
+import { evaluateAShareStrategies } from './src/services/ashareStrategies';
 import {
   loadPersistedStore,
   savePersistedStore,
@@ -56,6 +57,8 @@ app.get('/api/ashare/instruments', (_req, res) => {
 });
 
 // 按需全量 K 线（深度分析/风险贡献图等前端组件消费）
+// ?limit=N 只回尾部 N 根：前端算 EWMAC(32/128)+MA250 只需 ~400 根即可；
+// 全量 8000+ 根（福耀）单只就 1MB+，批量补齐 K 线时会拖垮首屏。
 app.get('/api/ashare/bars/:code', (req, res) => {
   const code = String(req.params.code || '');
   const inst = instrumentsStore.find(
@@ -65,7 +68,16 @@ app.get('/api/ashare/bars/:code', (req, res) => {
     res.status(404).json({ error: `instrument not found: ${code}` });
     return;
   }
-  res.json({ code: inst.code, name: inst.name, bars: inst.bars || [] });
+  const bars = Array.isArray(inst.bars) ? inst.bars : [];
+  const rawLimit = Number(req.query.limit);
+  const limit = Number.isFinite(rawLimit) ? Math.min(20_000, Math.max(20, Math.floor(rawLimit))) : 0;
+  res.json({
+    code: inst.code,
+    name: inst.name,
+    lastBarDate: bars.length ? bars[bars.length - 1].tradeDate : null,
+    barCount: bars.length,
+    bars: limit ? bars.slice(-limit) : bars,
+  });
 });
 
 // 动态解析并补全任意 A 股 / ETF 标的信息（优先在已有池寻找，未找到则从实时接口获取最新行情）
@@ -327,7 +339,7 @@ app.get('/api/ashare/freshness', (_req, res) => {
 // 在线增量拉取最新交易日数据并同步 (GET)
 app.get('/api/ashare/sync-latest', async (_req, res) => {
   try {
-    const out = await runBarSyncThenSnapshot(null);
+    const out = await runSyncSingleFlight(null);
     res.json({
       success: true,
       report: out.snapshotReport,
@@ -345,7 +357,7 @@ app.post('/api/ashare/sync-latest', async (req, res) => {
   try {
     const targetCodes: string[] | null = Array.isArray(req.body?.codes) ? req.body.codes : null;
     const includeBars = req.body?.bars !== false; // 默认包含日线更新；bars:false 可只刷快照
-    const out = await runBarSyncThenSnapshot(targetCodes, includeBars);
+    const out = await runSyncSingleFlight(targetCodes, includeBars);
     res.json({
       success: true,
       report: out.snapshotReport,
@@ -357,6 +369,29 @@ app.post('/api/ashare/sync-latest', async (req, res) => {
     res.status(500).json({ success: false, message: err?.message || 'Sync failed' });
   }
 });
+
+/**
+ * 单飞（single-flight，2026-10-15）：同一时刻对同一 (codes, includeBars) 的重复请求共享同一次执行。
+ * 前端已有 useRef 闸门，但多标签页/刷新期间的并发、或外部脚本仍会各发一次 ——
+ * 每次要拉 22 只实时快照（约 3s、22 个外部请求），白白重复打行情源。
+ * 注意：共享的 promise 必须挂 catch（Node22 unhandled-rejection=throw 会直接杀进程）。
+ */
+const syncInFlight = new Map<string, Promise<{ barReport: any; snapshotReport: any }>>();
+function runSyncSingleFlight(
+  codes: string[] | null,
+  includeBars = true,
+): Promise<{ barReport: any; snapshotReport: any }> {
+  const key = `${includeBars ? 'bars' : 'snapshot'}|${(codes || []).slice().sort().join(',')}`;
+  const existing = syncInFlight.get(key);
+  if (existing) {
+    console.log(`[sync-latest] 合并并发请求：${key}`);
+    return existing;
+  }
+  const p = runBarSyncThenSnapshot(codes, includeBars);
+  syncInFlight.set(key, p);
+  p.finally(() => syncInFlight.delete(key)).catch(() => undefined);
+  return p;
+}
 
 /**
  * 同步编排（2026-10-15）：日线增量 → 重载（指标重算）→ 快照。
@@ -393,6 +428,8 @@ async function runBarSyncThenSnapshot(
   const { updatedInstruments, report } = await syncAllInstruments(pool);
   const codeMap = new Map(updatedInstruments.map((u) => [u.id, u]));
   instrumentsStore = instrumentsStore.map((i) => codeMap.get(i.id) || i);
+  // 快照会更新现价/ATR → 趋势标量必须跟着重算（否则界面拿旧价算出的标量调仓）
+  instrumentsStore = attachSignals(instrumentsStore);
   savePersistedStore(instrumentsStore, 'sync-latest');
   return { barReport, snapshotReport: report };
 }
@@ -599,7 +636,33 @@ async function finalizeCatalog(base: any[]): Promise<any[]> {
       ? { ...inst, currentPrice: inst.vwapPrice }
       : inst,
   );
-  return base;
+
+  // 6. 策略标量（2026-10-15）：前端 universe 的 bars 是合成的（/instruments 瘦身只发 barsCount/
+  //    lastBarDate），浏览器侧算 EWMAC 用的是伪随机价格 —— 实测标量偏差达 17.0/20 且直接驱动
+  //    carverEngine 的目标股数。故在服务端用真实 parquet bars 算好整套 StrategySignals 下发
+  //    （约 250B/只，而非 1MB+ 的 bars），前端 evaluateAShareStrategies 直接消费。
+  return attachSignals(base);
+}
+
+/** 用真实 bars 在服务端计算策略标量并挂到 instrument.signals（前端不再自己算趋势） */
+function attachSignals(store: any[]): any[] {
+  return store.map((inst) => {
+    if (!Array.isArray(inst?.bars) || inst.bars.length === 0) {
+      if (!inst?.signals) return inst;
+      // 无法重算就宁可「没有」：让前端退回本地计算（合成 K 线 → 趋势中性），
+      // 绝不让上一轮残留/落盘的派生标量冒充当前标量被下发（fail-closed）。
+      const { signals, ...rest } = inst;
+      return rest;
+    }
+    try {
+      return { ...inst, signals: evaluateAShareStrategies(inst, store) };
+    } catch (err: any) {
+      // 单只失败不阻断 catalog：前端该只会退回本地计算（同上，剔除残留 signals）
+      console.warn(`[signals] ${inst?.code} 标量计算失败：${err?.message}`);
+      const { signals, ...rest } = inst;
+      return rest;
+    }
+  });
 }
 
 // 启动时加载顺序：llmquant 的本地 parquet 真实数据 -> 合并持久化覆盖(持仓/权重) -> 无则回退 mock

@@ -21,6 +21,12 @@ interface CarverPositionSizerProps {
   universe: AShareInstrument[];
   positions: PositionCalculation[];
   settings: CarverSettings;
+  /**
+   * 引擎实际生效的 IDM（= summary.carverIDM，已按 maxIDM 封顶）。由 App 传入，保证
+   * 「卡片显示值」与「引擎执行值」同源——旧版卡片自己拿 universe 算，而浏览器 universe
+   * 的 bars 是合成的（相关性引擎把标的全过滤掉）→ 卡片恒显示 1.00，与真实口径 ≈1.8 不一致。
+   */
+  effectiveIDM?: number;
   onUpdateSettings: (newSettings: CarverSettings) => void;
   onUpdateInstrumentWeight: (id: string, weight: number) => void;
   onUpdateCurrentShares: (id: string, shares: number) => void;
@@ -31,6 +37,7 @@ export const CarverPositionSizer: React.FC<CarverPositionSizerProps> = ({
   universe,
   positions,
   settings,
+  effectiveIDM,
   onUpdateSettings,
   onUpdateInstrumentWeight,
   onUpdateCurrentShares,
@@ -46,14 +53,18 @@ export const CarverPositionSizer: React.FC<CarverPositionSizerProps> = ({
   const maxLeverageLimitPct = Number(((settings.maxLeverage ?? 0.20) * 100).toFixed(0));
   const totalBudgetWeight = (positions || []).reduce((acc, p) => acc + (p?.instrument?.riskBudgetWeight || 0), 0);
 
-  // 真实自适应 IDM：基于 60D 相关性矩阵求解（与相关性分析页同一引擎，避免重复"计算中"占位）
+  // IDM 显示值优先用引擎实际生效值（同源，避免「卡片 1.00 vs 引擎 1.80」自相矛盾）；
+  // 仅在未传入时退回本地计算（本地 universe 的 bars 可能是合成的 → 会退化成 1.0）。
   const autoIDM = React.useMemo(() => {
+    if (typeof effectiveIDM === 'number' && Number.isFinite(effectiveIDM) && effectiveIDM > 0) {
+      return effectiveIDM;
+    }
     try {
       return computeUniverseCorrelationMatrix(universe || []).carverIDM;
     } catch {
       return 1.0;
     }
-  }, [universe]);
+  }, [universe, effectiveIDM]);
 
   return (
     <div className="flex flex-col gap-6 p-6">

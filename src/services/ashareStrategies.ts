@@ -197,6 +197,19 @@ export function evaluateAShareStrategies(
   const bars = Array.isArray(instrument?.bars) ? instrument.bars : [];
   const closes = bars.map(b => b.close);
   const currentPrice = instrument?.currentPrice || 1.0;
+
+  // 服务端已用真实 parquet bars 算好整套标量（2026-10-15）：直接用，不要在浏览器里用合成 bars 重算。
+  // 实测本地重算与真实 K 线的偏差可达 17.0/20，且差额会直接变成目标股数。
+  const serverSignals = (instrument as any)?.signals as StrategySignals | undefined;
+  if (serverSignals && typeof serverSignals.finalForecastScalar === 'number') {
+    return serverSignals;
+  }
+
+  // ⚠️ 合成 K 线不得产出趋势标量（2026-10-15 实测）：服务端 /instruments 瘦身不发 bars，
+  // 浏览器侧 hydrateInstrument 会用伪随机序列兜底 → 用假价格算 EWMAC 会给出「看起来合理」的
+  // ±3~±20 标量，直接驱动 carverEngine 的目标股数（实测偏差可达 17.0/20）。
+  // 诚实做法：判定为合成时趋势部分一律中性化（=不做趋势下注），并打 trendBarsUnavailable 供 UI 提示。
+  const trendBarsUnavailable = instrument?.syntheticBars === true || bars.length < 20;
   // ⚠️ EWMAC 分母口径（2026-10-15 实测事故）：closes 是 hfq 后复权序列，分母必须与之同口径。
   // instrument.dailyATR 是「市价口径」（liveMarketSync 市价化后供 carverEngine 算目标股数），
   // 直接拿来做分母会让无量纲比值被放大复权因子倍（f 可达 96×，福耀），标量全被钳到 ±20。
@@ -209,9 +222,10 @@ export function evaluateAShareStrategies(
   const currentATR = hfqATR ?? (instrument?.dailyATR || 0.05);
 
   // 1. Carver Multi-horizon EWMAC (8/32, 16/64, 32/128)
-  const ewmac8_32 = computeEWMAC(closes, 8, 32, currentATR, currentPrice);
-  const ewmac16_64 = computeEWMAC(closes, 16, 64, currentATR, currentPrice);
-  const ewmac32_128 = computeEWMAC(closes, 32, 128, currentATR, currentPrice);
+  //    合成 K 线时全部归零（不参与组合），而非「算一个假的再钳制」。
+  const ewmac8_32 = trendBarsUnavailable ? 0 : computeEWMAC(closes, 8, 32, currentATR, currentPrice);
+  const ewmac16_64 = trendBarsUnavailable ? 0 : computeEWMAC(closes, 16, 64, currentATR, currentPrice);
+  const ewmac32_128 = trendBarsUnavailable ? 0 : computeEWMAC(closes, 32, 128, currentATR, currentPrice);
 
   // Equal-weight combination across horizons as prescribed by Carver
   const ewmacComposite = (ewmac8_32 * 0.4 + ewmac16_64 * 0.35 + ewmac32_128 * 0.25);
@@ -220,7 +234,9 @@ export function evaluateAShareStrategies(
   // In China A-shares, being below MA250 indicates a bear regime with high probability of persistent down-drift.
   const latestBar = bars.length > 0 ? bars[bars.length - 1] : undefined;
   const ma250 = latestBar?.ma250 ?? (closes.length >= 200 ? closes.slice(-200).reduce((a, b) => a + b, 0) / 200 : currentPrice);
-  const absoluteMomentumPass = currentPrice >= ma250;
+  // 合成 K 线没有真实 ma250，回退分支用的也是假 closes → 该门槛一律判「通过」（中性），
+  // 避免用假数据触发熊市惩罚（把 +标量砍到 0.4x 或负标量压到 -5）。
+  const absoluteMomentumPass = trendBarsUnavailable ? true : currentPrice >= ma250;
 
   // 3. Relative Strength (RS) ranking within universe (20-day return vs peers)
   const calc20dReturn = (inst: AShareInstrument) => {
@@ -236,7 +252,10 @@ export function evaluateAShareStrategies(
   const peerReturns = safeUniverse.map(inst => ({ id: inst.id, ret: calc20dReturn(inst) }));
   peerReturns.sort((a, b) => a.ret - b.ret);
   const rankIdx = peerReturns.findIndex(p => p.id === instrument?.id);
-  const relativeStrengthRank = Math.round(((rankIdx + 1) / Math.max(1, peerReturns.length)) * 100);
+  // 合成 K 线的 20 日收益是假的：不给伪排名，直接中性 50（该指标仅展示，不进入标量）
+  const relativeStrengthRank = trendBarsUnavailable
+    ? 50
+    : Math.round(((rankIdx + 1) / Math.max(1, peerReturns.length)) * 100);
 
   // 4. ETF Dividend Yield & Low-Vol Safety Score
   let dividendRankScore = 50;
@@ -329,6 +348,7 @@ export function evaluateAShareStrategies(
   }
 
   // 7. Synthesize Final Composite Carver Forecast Scalar (-20 to +20)
+  //    合成 K 线时趋势项为 0 → 综合标量中性，交由估值/溢价等「快照真实字段」继续生效。
   let finalScalar = ewmacComposite;
   
   // If failed MA250 absolute momentum in A-shares, penalize trend (cut positive exposure in half or force defensive)
@@ -366,5 +386,6 @@ export function evaluateAShareStrategies(
     valuationSignal,
     liquidityState,
     finalForecastScalar: finalScalar,
+    trendBarsUnavailable,
   };
 }

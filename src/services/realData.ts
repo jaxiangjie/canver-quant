@@ -302,6 +302,16 @@ export async function loadRealUniverse(): Promise<AShareInstrument[]> {
       vwapPrice: vwapPrice > 0 ? marketOr(vwapPrice) : undefined,
       bars,
       dataSource: 'parquet',
+      // ⚠️ 必须显式清除占位模板残留的 syntheticBars:true（2026-10-15 实测）：
+      // registryToTemplates() 造的占位模板是 {dataSource:'fallback', syntheticBars:true, bars:[]}，
+      // 晋升成功后 OHLC 已是真实后复权序列、dataSource 也改成了 parquet，却漏了这一个标记。
+      // 残留后果（都不是「少个标记」这么轻）：① runRealBacktest / correlationEngine 按
+      // syntheticBars 过滤 → 562500/512660 被静默剔除（相关性矩阵少两条腿）；② 趋势标量被判定
+      // 「无真实 K 线」而中性化；③ dailyBarSync 直接跳过 → 它们的 K 线再也不会日更（静默变旧）。
+      syntheticBars: false,
+      // 「成交额是合成的」是另一回事（staging 伪成交额 = volShares×close）：ADV/冲击成本类
+      // 消费方需要知情，故单独标记，不再与「K 线是否合成」混用同一字段。
+      syntheticAmount: isSyntheticAmountSource,
     });
   }
   if (fallbackCount > 0) {

@@ -1,5 +1,5 @@
 {
-  "savedAt": "2026-10-13T00:37:52.347Z",
+  "savedAt": "2026-10-15T15:14:34.946Z",
   "portfolios": [
     {
       "id": "user_actual_holdings",
@@ -7,88 +7,88 @@
       "description": "重仓恒生科技、航天与机器人，缺乏固收与现金备付垫的现状组合",
       "totalCapital": 420000,
       "isOfficial": false,
-      "updatedAt": "2026-10-12T23:30:54.725Z",
+      "updatedAt": "2026-10-15T15:14:34.939Z",
       "items": [
         {
           "id": "act_1",
           "code": "513180.SH",
           "name": "恒生科技ETF (QDII)",
           "category": "qdii_etf",
-          "amount": 57500,
+          "amount": 17200,
           "profitRate": -24,
           "profitAmount": -36000,
-          "annualizedVol": 0.2761,
-          "notes": "标量 +5.2 (乘数 1.26x)；站上年线/正动量，释放进攻仓位",
-          "currentPrice": 0.523
+          "annualizedVol": 0.2592,
+          "notes": "标量 -12.9 (乘数 0.35x)；跌破均线/负动量，Carver 强制压降仓位防守",
+          "currentPrice": 0.51
         },
         {
           "id": "act_2",
           "code": "562500.SH",
           "name": "机器人ETF华夏",
           "category": "sector_etf",
-          "amount": 36000,
+          "amount": 10200,
           "profitRate": -13.3,
           "profitAmount": -6000,
-          "annualizedVol": 0.35,
-          "notes": "标量 0.0 (乘数 1.00x)；中性震荡区间",
-          "currentPrice": 1
+          "annualizedVol": 0.3744,
+          "notes": "标量 -13.9 (乘数 0.30x)；跌破均线/负动量，Carver 强制压降仓位防守",
+          "currentPrice": 0.787
         },
         {
           "id": "act_3",
           "code": "512660.SH",
           "name": "军工/航天ETF",
           "category": "sector_etf",
-          "amount": 36000,
+          "amount": 24600,
           "profitRate": -13.3,
           "profitAmount": -6000,
-          "annualizedVol": 0.35,
-          "notes": "标量 0.0 (乘数 1.00x)；中性震荡区间",
-          "currentPrice": 1
+          "annualizedVol": 0.3065,
+          "notes": "标量 -8.0 (乘数 0.60x)；跌破均线/负动量，Carver 强制压降仓位防守",
+          "currentPrice": 1.031
         },
         {
           "id": "act_4",
           "code": "512890.SH",
           "name": "红利低波ETF",
           "category": "broad_etf",
-          "amount": 104900,
+          "amount": 105000,
           "profitRate": 3,
           "profitAmount": 1500,
-          "annualizedVol": 0.1417,
-          "notes": "标量 +18.5 (乘数 1.93x)；站上年线/正动量，释放进攻仓位",
-          "currentPrice": 1.23
+          "annualizedVol": 0.1372,
+          "notes": "标量 +6.3 (乘数 1.31x)；站上年线/正动量，释放进攻仓位",
+          "currentPrice": 1.212
         },
         {
           "id": "act_5",
           "code": "601288.SH",
           "name": "农业银行 (低估银行)",
           "category": "stock_cn",
-          "amount": 105000,
+          "amount": 60300,
           "profitRate": 3,
           "profitAmount": 1500,
-          "annualizedVol": 0.2362,
-          "notes": "标量 +20.0 (乘数 2.00x)；站上年线/正动量，释放进攻仓位",
-          "currentPrice": 7.19
+          "annualizedVol": 0.2339,
+          "notes": "标量 +2.4 (乘数 1.12x)；中性震荡区间",
+          "currentPrice": 7.26
         },
         {
           "id": "act_6",
           "code": "518880.SH",
           "name": "黄金ETF",
           "category": "commodity_etf",
-          "amount": 69500,
+          "amount": 36400,
           "profitRate": -3.7,
           "profitAmount": -3000,
-          "annualizedVol": 0.2112,
-          "notes": "标量 +3.4 (乘数 1.17x)；中性震荡区间",
-          "currentPrice": 8.585
+          "annualizedVol": 0.2107,
+          "notes": "标量 -7.7 (乘数 0.61x)；跌破均线/负动量，Carver 强制压降仓位防守",
+          "currentPrice": 8.472
         },
         {
-          "id": "cash_1791847853077",
+          "id": "cash_1792077273881",
           "code": "CASH",
           "name": "现金 / 货币基金 (安全垫)",
           "category": "bond_etf",
-          "amount": 11100,
+          "amount": 166300,
           "annualizedVol": 0.01,
-          "notes": "Carver 动态风控沉淀: 当前非满仓状态，留有 2.6% 现金消除焦虑"
+          "notes": "Carver 动态风控沉淀: 当前非满仓状态，留有 39.6% 现金消除焦虑"
         }
       ]
     },
@@ -98,67 +98,76 @@
       "description": "恒科削减、机器人航天合并控仓、增补国债与现金垫的平衡组合",
       "totalCapital": 420000,
       "isOfficial": false,
-      "updatedAt": "2026-10-12T23:25:07.732Z",
+      "updatedAt": "2026-10-15T15:14:32.357Z",
       "items": [
         {
           "id": "opt_1",
           "code": "513180.SH",
           "name": "恒生科技ETF (QDII)",
           "category": "qdii_etf",
-          "amount": 57500,
-          "annualizedVol": 0.2761,
-          "notes": "标量 +5.2 (乘数 1.26x)；站上年线/正动量，释放进攻仓位",
-          "currentPrice": 0.523
+          "amount": 17200,
+          "annualizedVol": 0.2592,
+          "notes": "标量 -12.9 (乘数 0.35x)；跌破均线/负动量，Carver 强制压降仓位防守",
+          "currentPrice": 0.51
         },
         {
           "id": "opt_2",
           "code": "562500.SH",
           "name": "机器人/航天成长",
           "category": "sector_etf",
-          "amount": 36000,
-          "annualizedVol": 0.35,
-          "notes": "标量 0.0 (乘数 1.00x)；中性震荡区间",
-          "currentPrice": 1
+          "amount": 10200,
+          "annualizedVol": 0.3744,
+          "notes": "标量 -13.9 (乘数 0.30x)；跌破均线/负动量，Carver 强制压降仓位防守",
+          "currentPrice": 0.787
         },
         {
           "id": "opt_3",
           "code": "512890.SH",
           "name": "红利低波ETF",
           "category": "broad_etf",
-          "amount": 104900,
-          "annualizedVol": 0.1417,
-          "notes": "标量 +18.5 (乘数 1.93x)；站上年线/正动量，释放进攻仓位",
-          "currentPrice": 1.23
+          "amount": 105000,
+          "annualizedVol": 0.1372,
+          "notes": "标量 +6.3 (乘数 1.31x)；站上年线/正动量，释放进攻仓位",
+          "currentPrice": 1.212
         },
         {
           "id": "opt_4",
           "code": "601288.SH",
           "name": "农业银行 (低估银行)",
           "category": "stock_cn",
-          "amount": 105000,
-          "annualizedVol": 0.2362,
-          "notes": "标量 +20.0 (乘数 2.00x)；站上年线/正动量，释放进攻仓位",
-          "currentPrice": 7.19
+          "amount": 60300,
+          "annualizedVol": 0.2339,
+          "notes": "标量 +2.4 (乘数 1.12x)；中性震荡区间",
+          "currentPrice": 7.26
         },
         {
           "id": "opt_5",
           "code": "518880.SH",
           "name": "黄金ETF",
           "category": "commodity_etf",
-          "amount": 69500,
-          "annualizedVol": 0.2112,
-          "notes": "标量 +3.4 (乘数 1.17x)；中性震荡区间",
-          "currentPrice": 8.585
+          "amount": 36400,
+          "annualizedVol": 0.2107,
+          "notes": "标量 -7.7 (乘数 0.61x)；跌破均线/负动量，Carver 强制压降仓位防守",
+          "currentPrice": 8.472
         },
         {
           "id": "opt_6",
           "code": "511010.SH",
           "name": "国债ETF (压舱石)",
           "category": "bond_etf",
-          "amount": 70400,
+          "amount": 70500,
           "annualizedVol": 0.0589,
-          "notes": "标量 +5.2 (乘数 1.26x)；站上年线/正动量，释放进攻仓位",
-          "currentPrice": 140.818
+          "notes": "标量 -18.3 (乘数 0.80x)；跌破均线/负动量，Carver 强制压降仓位防守",
+          "currentPrice": 140.906
+        },
+        {
+          "id": "cash_1792077271405",
+          "code": "CASH",
+          "name": "现金 / 货币基金 (安全垫)",
+          "category": "bond_etf",
+          "amount": 120400,
+          "annualizedVol": 0.01,
+          "notes": "Carver 动态风控沉淀: 当前非满仓状态，留有 28.7% 现金消除焦虑"
         }
       ]
     }

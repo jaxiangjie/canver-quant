@@ -2,6 +2,7 @@ import React, { useRef, useEffect, useState } from 'react';
 import { AShareInstrument, BacktestDataPoint, CarverSettings, PortfolioSummaryStats } from '../types/ashare';
 import { DEFAULT_CARVER_SETTINGS } from '../services/carverEngine';
 import { runRealBacktest, BacktestMetrics } from '../services/backtestEngine';
+import { AShareDataService } from '../services/apiClient';
 import { 
   LineChart, 
   BarChart2, 
@@ -56,7 +57,9 @@ export const BacktestSandbox: React.FC<BacktestSandboxProps> = ({
   }
 }) => {
   // Navigation between sub-tabs
-  const [subTab, setSubTab] = useState<'correlation' | 'stress' | 'monte_carlo' | 'comparison' | 'liquidity'>('correlation');
+  // 2026-10-15 补 'equity'：净值曲线+绩效卡原本是「不匹配任何子页签」的兜底分支，
+  // 而唯一能到达它的按钮叫「T+1 流动性保护 (ADV)」——主回测视图被藏在 ADV 标签下，极易被忽略。
+  const [subTab, setSubTab] = useState<'equity' | 'correlation' | 'stress' | 'monte_carlo' | 'comparison' | 'liquidity'>('equity');
 
   // T+1 Liquidity Protection settings
   const [advCapRatio, setAdvCapRatio] = useState<number>(0.20); // 默认 20%
@@ -70,15 +73,38 @@ export const BacktestSandbox: React.FC<BacktestSandboxProps> = ({
   const drawdownCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const [hoverIndex, setHoverIndex] = useState<number | null>(null);
 
+  // 真实 K 线补齐（2026-10-15）：服务端 /instruments 走 stripBars 瘦身，浏览器侧 universe 的
+  // bars 是 hydrateInstrument 合成的伪序列（syntheticBars=true）——而 runRealBacktest 会把这些
+  // 标的全部过滤掉，结果是「空回测 + 空相关性矩阵」。此处按需拉真实全量 K 线（不截断，回测要用全历史）。
+  const [barsUniverse, setBarsUniverse] = useState<AShareInstrument[]>(universe);
+  const [barsLoading, setBarsLoading] = useState(false);
+  useEffect(() => {
+    let cancelled = false;
+    setBarsLoading(true);
+    AShareDataService.ensureRealBars(universe)
+      .then((merged) => {
+        if (!cancelled) setBarsUniverse(merged);
+      })
+      .catch((err) => console.warn('[backtest] 真实 K 线补齐失败，回测将无可用标的:', err))
+      .finally(() => {
+        if (!cancelled) setBarsLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [universe]);
+
   // 真实回测：基于 parquet 后复权日线跑 walk-forward 月度再平衡，universe/参数变化时重算
   useEffect(() => {
     let cancelled = false;
+    // K 线还没补齐就开跑 = 必然得到空 series，先等补齐（否则用户看到一瞬间的「无数据」）
+    if (barsLoading) return;
     setIsComputing(true);
     // debounce 200ms：滑块拖动（如 ADV 比例 step=0.05）会触发连续 onChange，
     // 旧实现 setTimeout(...,0) 只错开一帧，每次都跑一遍全量 walk-forward，主线程掉帧。
     const timer = setTimeout(() => {
       try {
-        const { series, metrics: m } = runRealBacktest(universe, settings, {
+        const { series, metrics: m } = runRealBacktest(barsUniverse, settings, {
           advCapRatio,
           stressLevel,
         });
@@ -101,7 +127,7 @@ export const BacktestSandbox: React.FC<BacktestSandboxProps> = ({
       cancelled = true;
       clearTimeout(timer);
     };
-  }, [universe, advCapRatio, stressLevel, settings]);
+  }, [barsUniverse, barsLoading, advCapRatio, stressLevel, settings]);
 
   // Draw Equity Curve Canvas
   useEffect(() => {
@@ -306,7 +332,8 @@ export const BacktestSandbox: React.FC<BacktestSandboxProps> = ({
   const csiMinDD = dataPoints.length ? Math.min(...dataPoints.map(p => p.csi300Drawdown)) : 0;
 
   // Compute 5-day ADV and 20% cap for each instrument in universe
-  const safeUniverse = Array.isArray(universe) ? universe.filter(Boolean) : [];
+  // 用补齐真实 K 线后的 universe：合成 bars 的 turnover 是假的，ADV 上限会失真
+  const safeUniverse = Array.isArray(barsUniverse) ? barsUniverse.filter(Boolean) : [];
   const instrumentLiquidityList = safeUniverse.map(inst => {
     const bars = Array.isArray(inst?.bars) ? inst.bars : [];
     // 5-day average daily turnover estimation (in RMB)
@@ -353,6 +380,17 @@ export const BacktestSandbox: React.FC<BacktestSandboxProps> = ({
         </div>
 
         <div className="flex flex-wrap items-center bg-slate-950 p-1 rounded-lg border border-slate-800 gap-1">
+          <button
+            onClick={() => setSubTab('equity')}
+            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-semibold transition-all ${
+              subTab === 'equity'
+                ? 'bg-emerald-600 text-white shadow-sm'
+                : 'text-slate-400 hover:text-white'
+            }`}
+          >
+            <LineChart className="w-3.5 h-3.5" />
+            净值曲线与绩效
+          </button>
           <button
             onClick={() => setSubTab('correlation')}
             className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-semibold transition-all ${
@@ -412,15 +450,22 @@ export const BacktestSandbox: React.FC<BacktestSandboxProps> = ({
       </div>
 
       {subTab === 'correlation' ? (
-        <CorrelationAnalysisMatrix universe={universe} />
+        <CorrelationAnalysisMatrix universe={barsUniverse} />
       ) : subTab === 'stress' ? (
-        <StressTestingPanel universe={universe} />
+        <StressTestingPanel universe={barsUniverse} />
       ) : subTab === 'monte_carlo' ? (
         <MonteCarloProjectionPanel settings={settings} summary={summary} />
       ) : subTab === 'comparison' ? (
-        <StrategyComparisonPanel universe={universe} />
+        <StrategyComparisonPanel universe={barsUniverse} />
       ) : (
+        // 兜底分支 = 净值曲线与绩效（subTab='equity'）+ T+1 流动性表（subTab='liquidity'）共用
         <>
+          {barsLoading && (
+            <div className="p-3 bg-slate-900/80 border border-sky-900/50 rounded-lg text-xs text-sky-300 flex items-center gap-2">
+              <Info className="w-3.5 h-3.5" />
+              正在加载真实 K 线（服务端不随接口下发 bars，回测需要全历史）…
+            </div>
+          )}
           {/* 真实回测绩效指标对比卡（基于 parquet 后复权日线） */}
           {metrics && (
             <div className="p-4 bg-slate-900/80 border border-emerald-900/50 rounded-lg">

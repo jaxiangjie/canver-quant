@@ -43,10 +43,20 @@ export interface AShareInstrument {
   dataSource?: 'parquet' | 'fallback' | 'manual' | 'realtime_synced'; // 数据来源：parquet 真实行情 / 无数据回退模板 / 用户自定义 / 实时增量同步
   vwapPrice?: number;  // 市价近似：parquet amount/volume 的 VWAP（hfq close 含复权系数，不能直接当市价用于下单/定仓）
   syntheticBars?: boolean;  // bars 是否为合成的伪数据（无真实行情源）；回测与相关性计算应排除此类标的
+  /**
+   * 成交额(amount)是否为构造的伪值（staging 晋升标的 = volShares×close），与 K 线真假无关（2026-10-15）。
+   * K 线（OHLC）仍是真实后复权序列，故 syntheticBars=false；但 ADV/冲击成本类消费方需按此降级。
+   */
+  syntheticAmount?: boolean;
   // 服务端真实 K 线的元信息（2026-10-15）：接口为瘦身只下发 barsCount/lastBarDate 而不发 bars，
   // 前端 bars 因此可能是合成的 —— 展示「数据时效/根数」必须用这两个字段，不能拿合成 bars 的日期冒充。
   barsCount?: number;          // 服务端真实 K 线根数
   lastBarDate?: string | null; // 服务端真实 K 线末根交易日（YYYY-MM-DD）
+  /**
+   * 服务端用真实 parquet bars 算好的策略标量（2026-10-15）。
+   * 前端 bars 是合成的 → 本地算 EWMAC 会得到伪标量（实测偏差达 17/20），故以服务端为准。
+   */
+  signals?: StrategySignals;
   riskBudgetWeight: number; // 目标风险预算权重 (0 - 1)
   currentShares: number;// 当前实际持有股数 (手数为 currentShares / 100)
   premiumDiscountRate?: number; // ETF二级市场折溢价率 (%)
@@ -142,6 +152,8 @@ export interface StrategySignals {
   valuationSignal: ValuationPercentileSignal; // 滚动市盈率PE与市净率PB估值百分位
   liquidityState: 'NORMAL' | 'CAUTION_T1' | 'LIMIT_DOWN_RISK'; // 流动性评级
   finalForecastScalar: number;   // 综合卡弗标量 ( -20 到 +20 )
+  /** bars 为合成序列 → 趋势项(EWMAC/MA250/相对强弱)已中性化，标量不含趋势下注（2026-10-15） */
+  trendBarsUnavailable?: boolean;
 }
 
 export interface CarverSettings {

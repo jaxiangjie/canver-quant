@@ -158,12 +158,18 @@ export function stitchByReturns(
     }
   }
 
-  // amount 还原比例：真实成交额 /（股数 × hfq close）的中位数（历史 amount 缺失时退化为 1）
-  const ratios = overlap
+  // amount 还原比例：必须用**现有 parquet 自身**的 amount/(volume×hfq close) 中位数。
+  // ⚠️ 不能用腾讯序列算（2026-10-15 实测踩坑）：腾讯 hfq 的 amount 是构造值（≡ volume×close，
+  // 该比值中位数恒为 1 —— realData 的 detectSyntheticAmount 正是靠这个指纹识别 staging 源），
+  // 拿它当比例会让新增 bar 的 amount = volume×hfqClose：对复权因子 f≈97 的福耀直接放大 95 倍，
+  // 把 ADV / 冲击成本 / 换手率一并污染。parquet 自身的比值即「市价口径 ÷ 后复权口径」的换算系数
+  // （510300 实测 0.80 ≈ 该标的 hfqToMarketFactor），用它还原才与历史同量纲。
+  const selfRatios = existing
+    .slice(-60)
     .filter((b) => (b as any).amount > 0 && b.volume > 0 && b.close > 0)
     .map((b) => (b as any).amount / (b.volume * b.close))
     .filter((r) => Number.isFinite(r) && r > 0);
-  const amountRatio = ratios.length ? median(ratios) : 1;
+  const amountRatio = selfRatios.length ? median(selfRatios) : 1;
 
   let prevHfqClose = last.close;
   let prevTcClose = anchor.close;

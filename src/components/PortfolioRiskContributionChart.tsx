@@ -81,7 +81,9 @@ export const PortfolioRiskContributionChart: React.FC<PortfolioRiskContributionC
       for (const code of neededCodes) {
         if (cancelled) return;
         try {
-          const bars = await AShareDataService.fetchInstrumentBars(code);
+          // 只要最近 90 根（算 60 日净值窗口足够）——旧实现拉全量：中国石油 4594 根单只 ~1MB，
+          // 9 腿顺序拉取既慢又浪费。服务端 ?limit= 会做尾部截断。
+          const bars = await AShareDataService.fetchInstrumentBars(code, 90);
           if (!cancelled && bars.length > 0) {
             setBarsMap((prev) => {
               if (prev.has(code)) return prev;
@@ -149,72 +151,109 @@ export const PortfolioRiskContributionChart: React.FC<PortfolioRiskContributionC
 
   const totalRiskBudgeted = chartData.reduce((acc, d) => acc + d.dailyRisk, 0);
 
-  // 2. Compute 60-Day Historical Cumulative NAV Curve & Benchmark
+  // 2. 组合净值曲线：按**交易日对齐**回溯最近 60 个交易日（2026-10-15 修正）
+  //
+  // 旧实现按**数组下标**取各腿 bars[i]：各腿历史长度差异极大（红利低波 1398 根、中国石油 4594 根），
+  // 同一个 index 会落在完全不同的日期上（实测 index=1338 时 510300→2018-07-06、601857→2013-05-21、
+  // 512890→2026-07-16）；而日期标签在 forEach 里被反复覆盖，最终取"最后一个腿"的日期
+  // → 横轴显示成 2024-12~2025-03（用户看到"日期不是最新"）。更严重的是单日收益是**跨日期混算**的，
+  // 整条曲线（含基准）在数值上都无意义。现在改为：取各腿共同交易日 → 按日期查表取 close。
+  const NAV_LOOKBACK = 60;
   const historicalNAVData = useMemo(() => {
     const barsOf = (p: any): AShareBar[] => barsMap.get(p.instrument.code) || p.instrument.bars || [];
-    const validPositions = Array.isArray(positions)
-      ? positions.filter(p => p && p.instrument && barsOf(p).length > 30)
-      : [];
-
+    // 只保留真正有持仓的腿：无持仓腿既不该进组合收益，也不该决定共同日期窗口
+    // （旧实现里 513520 持仓为 0 却决定了整条曲线的日期标签）
+    const validPositions = (Array.isArray(positions) ? positions : []).filter(
+      (p) => p && p.instrument && (p.currentShares || 0) > 0 && barsOf(p).length > 30,
+    );
     if (validPositions.length === 0) return [];
 
-    const totalEquity = validPositions.reduce((acc, p) => acc + (p.currentShares * p.instrument.currentPrice), 0);
-    const weights = validPositions.map(p => ({
-      inst: p.instrument,
-      weight: totalEquity > 0 ? (p.currentShares * p.instrument.currentPrice) / totalEquity : (1 / validPositions.length),
-      bars: barsOf(p)
-    }));
+    const totalEquity = validPositions.reduce(
+      (acc, p) => acc + (p.currentShares || 0) * (p.instrument.currentPrice || 1),
+      0,
+    );
 
-    // Find common length, taking last 60 bars
-    const lookback = 60;
-    const baseLength = Math.min(...weights.map(w => w.bars.length));
-    if (baseLength < 2) return [];
+    // 每腿建立「交易日 → close」索引（按日期对齐的唯一依据）
+    const seriesList = validPositions.map((p) => {
+      const byDate = new Map<string, number>();
+      for (const b of barsOf(p)) {
+        if (b?.tradeDate && b.close > 0) byDate.set(b.tradeDate, b.close);
+      }
+      const mv = (p.currentShares || 0) * (p.instrument.currentPrice || 1);
+      return {
+        inst: p.instrument,
+        weight: totalEquity > 0 ? mv / totalEquity : 1 / validPositions.length,
+        byDate,
+      };
+    });
 
-    const effectiveLookback = Math.min(lookback, baseLength);
-    const startIndex = baseLength - effectiveLookback;
+    // 共同交易日 = 各腿都有数据的日期交集（升序）
+    const allDateLists = seriesList.map((s) => [...s.byDate.keys()]);
+    const [firstList, ...others] = allDateLists;
+    const othersSets = others.map((l) => new Set(l));
+    const commonDates = firstList.filter((d) => othersSets.every((s) => s.has(d))).sort();
+    if (commonDates.length < 2) return [];
+    // +1 根起点用于计算首日收益 → 正好产出 NAV_LOOKBACK 个交易日
+    const window = commonDates.slice(-(NAV_LOOKBACK + 1));
+
+    // 基准：优先沪深300；**组合里没有 510300 时不能拿"第一条腿"冒充沪深300**
+    // （poorlab11 是 11 只个股等权，回退到 series[0] = 农业银行，旧版却把它标成「沪深300 买入持有」）
+    const bench = seriesList.find((s) => s.inst.id === '510300') ?? seriesList[0];
+    const benchLabel =
+      bench.inst.id === '510300' ? '沪深300 买入持有' : `${bench.inst.name} 买入持有 (${String(bench.inst.code).split('.')[0]})`;
 
     let portAccum = 1.0;
-    let csiAccum = 1.0;
-
+    let benchAccum = 1.0;
     const points = [];
-    for (let i = startIndex; i < baseLength; i++) {
-      let dayPortReturn = 0;
-      let date = '';
-
-      weights.forEach(w => {
-        const prev = w.bars[i - 1]?.close || w.bars[i]?.close || 1;
-        const curr = w.bars[i]?.close || 1;
-        const r = (curr - prev) / prev;
-        dayPortReturn += r * w.weight;
-        date = w.bars[i]?.tradeDate || '';
-      });
-
-      // Find 510300 or first broad equity for benchmark
-      const csiWeightObj = weights.find(w => w.inst.id === '510300') || weights[0];
-      const csiPrev = csiWeightObj.bars[i - 1]?.close || 1;
-      const csiCurr = csiWeightObj.bars[i]?.close || 1;
-      const csiReturn = (csiCurr - csiPrev) / csiPrev;
-
-      if (i === startIndex) {
-        portAccum = 1.0;
-        csiAccum = 1.0;
-      } else {
-        // Carver volatility smoothing effect
-        portAccum *= (1 + dayPortReturn);
-        csiAccum *= (1 + csiReturn);
+    for (let i = 0; i < window.length; i++) {
+      const date = window[i];
+      if (i > 0) {
+        const prevDate = window[i - 1];
+        let dayReturn = 0;
+        for (const s of seriesList) {
+          const prev = s.byDate.get(prevDate);
+          const curr = s.byDate.get(date);
+          if (prev && curr && prev > 0 && curr > 0) dayReturn += (curr / prev - 1) * s.weight;
+        }
+        portAccum *= 1 + dayReturn;
+        const bp = bench.byDate.get(prevDate);
+        const bc = bench.byDate.get(date);
+        benchAccum *= 1 + (bp && bc && bp > 0 && bc > 0 ? bc / bp - 1 : 0);
       }
-
       points.push({
-        date: date.substring(5), // MM-DD
-        portfolioNAV: Number(portAccum.toFixed(3)),
-        csi300NAV: Number(csiAccum.toFixed(3)),
+        date: date.slice(5), // MM-DD（保持原显示风格）
+        fullDate: date,
+        portfolioNAV: Number(portAccum.toFixed(4)),
+        csi300NAV: Number(benchAccum.toFixed(4)),
         portfolioReturnPct: Number(((portAccum - 1) * 100).toFixed(2)),
-        csiReturnPct: Number(((csiAccum - 1) * 100).toFixed(2)),
+        csiReturnPct: Number(((benchAccum - 1) * 100).toFixed(2)),
+        benchLabel,
       });
     }
 
     return points;
-  }, [positions]);
+  }, [positions, barsMap]);
+
+  /** 净值曲线实际窗口（真实日期）+ 基准腿身份 + 参与腿数/市值，供 UI 标注 */
+  const navWindow = useMemo(() => {
+    if (!historicalNAVData.length) return null;
+    const first = historicalNAVData[0].fullDate;
+    const last = historicalNAVData[historicalNAVData.length - 1].fullDate;
+    const held = (Array.isArray(positions) ? positions : []).filter(
+      (p) => p && p.instrument && (p.currentShares || 0) > 0,
+    );
+    // 首点只是收益率累乘的起点锚，真正的"交易日数"= 点数 − 1（= NAV_LOOKBACK）
+    return {
+      first,
+      last,
+      days: Math.max(0, historicalNAVData.length - 1),
+      benchLabel: (historicalNAVData[0] as any).benchLabel as string | undefined,
+      // 腿数与市值明示：不同组合的曲线数值可能很接近（子集+涨跌抵消），
+      // 不给这两个数用户无法判断"是不是没切换成功"
+      legs: held.length,
+      exposure: held.reduce((a, p) => a + (p.currentShares || 0) * (p.instrument.currentPrice || 1), 0),
+    };
+  }, [historicalNAVData, positions]);
 
   // Custom tooltips
   const CustomPieTooltip = ({ active, payload }: any) => {
@@ -262,11 +301,11 @@ export const PortfolioRiskContributionChart: React.FC<PortfolioRiskContributionC
           <div className="font-bold text-slate-300 mb-1 font-mono">{label} 累计净值</div>
           <div className="space-y-1 font-mono text-[11px]">
             <div className="flex items-center justify-between gap-4">
-              <span className="text-emerald-400 font-sans">卡弗多资产组合:</span>
+              <span className="text-emerald-400 font-sans">卡弗组合（当前持仓）:</span>
               <span className="font-bold text-white tabular-nums">{p.portfolioNAV} ({(p.portfolioReturnPct >= 0 ? '+' : '')}{p.portfolioReturnPct}%)</span>
             </div>
             <div className="flex items-center justify-between gap-4">
-              <span className="text-rose-400 font-sans">沪深300 买入持有:</span>
+              <span className="text-rose-400 font-sans">{p.benchLabel || '基准 买入持有'}:</span>
               <span className="font-bold text-slate-300 tabular-nums">{p.csi300NAV} ({(p.csiReturnPct >= 0 ? '+' : '')}{p.csiReturnPct}%)</span>
             </div>
           </div>
@@ -425,7 +464,7 @@ export const PortfolioRiskContributionChart: React.FC<PortfolioRiskContributionC
                 <YAxis domain={['auto', 'auto']} tick={{ fill: '#64748B', fontSize: 9 }} />
                 <Tooltip content={<CustomNAVTooltip />} />
                 <Area type="monotone" dataKey="portfolioNAV" name="卡弗组合" stroke="#10B981" strokeWidth={2} fillOpacity={1} fill="url(#colorPortfolio)" />
-                <Area type="monotone" dataKey="csi300NAV" name="沪深300" stroke="#F43F5E" strokeWidth={1.5} fillOpacity={0} strokeDasharray="3 3" />
+                <Area type="monotone" dataKey="csi300NAV" name={navWindow?.benchLabel || '基准'} stroke="#F43F5E" strokeWidth={1.5} fillOpacity={0} strokeDasharray="3 3" />
               </AreaChart>
             </ResponsiveContainer>
           )}
@@ -476,7 +515,15 @@ export const PortfolioRiskContributionChart: React.FC<PortfolioRiskContributionC
           </div>
 
           <div className="flex items-center gap-1 text-slate-500 font-mono text-[9px]">
-            <span>日风险: ±¥{Math.round(totalRiskBudgeted).toLocaleString()}</span>
+            {chartMode === 'equity' && navWindow ? (
+              // 净值窗口按真实交易日对齐后回显，避免用户以为"日期没更新"
+              <span title="按各腿共同交易日对齐，权重 = 当前持仓市值占比">
+                近 {navWindow.days} 个交易日：{navWindow.first.slice(5)} ~ {navWindow.last.slice(5)} · {navWindow.legs} 腿 · 市值 ¥
+                {(navWindow.exposure / 10000).toFixed(1)}万
+              </span>
+            ) : (
+              <span>日风险: ±¥{Math.round(totalRiskBudgeted).toLocaleString()}</span>
+            )}
           </div>
         </div>
       </div>
@@ -508,7 +555,13 @@ export const PortfolioRiskContributionChart: React.FC<PortfolioRiskContributionC
                 <div className="flex items-center justify-between mb-3">
                   <span className="text-xs font-bold text-white flex items-center gap-2">
                     <LineChartIcon className="w-4 h-4 text-emerald-400" />
-                    <span>60 交易日多资产组合模拟净值走势 vs 沪深300 买入持有</span>
+                    <span>近 60 个交易日模拟净值走势 · 对比 {navWindow?.benchLabel || '基准 买入持有'}</span>
+                    {navWindow && (
+                      <span className="text-[10px] font-mono text-slate-400 font-normal">
+                        （近 {navWindow.days} 个交易日：{navWindow.first} ~ {navWindow.last} · {navWindow.legs} 腿 · 市值 ¥
+                        {Math.round(navWindow.exposure).toLocaleString()} · 按共同交易日对齐）
+                      </span>
+                    )}
                   </span>
                   <div className="flex items-center gap-3 text-xs font-mono">
                     <span className="text-emerald-400 flex items-center gap-1">
@@ -533,7 +586,7 @@ export const PortfolioRiskContributionChart: React.FC<PortfolioRiskContributionC
                       <YAxis domain={['auto', 'auto']} tick={{ fill: '#64748B', fontSize: 10 }} />
                       <Tooltip content={<CustomNAVTooltip />} />
                       <Area type="monotone" dataKey="portfolioNAV" name="卡弗组合" stroke="#10B981" strokeWidth={2.5} fillOpacity={1} fill="url(#modalColorPortfolio)" />
-                      <Area type="monotone" dataKey="csi300NAV" name="沪深300" stroke="#F43F5E" strokeWidth={1.5} fillOpacity={0} strokeDasharray="3 3" />
+                      <Area type="monotone" dataKey="csi300NAV" name={navWindow?.benchLabel || '基准'} stroke="#F43F5E" strokeWidth={1.5} fillOpacity={0} strokeDasharray="3 3" />
                     </AreaChart>
                   </ResponsiveContainer>
                 </div>

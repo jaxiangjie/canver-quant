@@ -121,7 +121,11 @@ historicalValuation: Array.isArray(raw?.historicalValuation) && raw.historicalVa
     // 展示层必须用这两个字段，不能拿合成 bars 的根数/末根日期当真实数据。
     barsCount: Number(raw?.barsCount ?? (Array.isArray(raw?.bars) ? raw.bars.length : 0)) || undefined,
     lastBarDate: raw?.lastBarDate ?? (hasRealBars ? raw.bars[raw.bars.length - 1].tradeDate : null),
+    // 服务端用真实 bars 算好的策略标量：必须透传，否则 hydrate 会把唯一真实的趋势口径丢掉
+    signals: raw?.signals,
     dataSource: raw?.dataSource ?? (hasRealBars ? 'parquet' : 'manual'),
+    // 成交额是否合成（staging 晋升源 = volShares×close）：与 K 线真假无关，ADV 类消费方要知情
+    syntheticAmount: raw?.syntheticAmount,
     // 基本面健康度扩展字段透传
     roe: raw?.roe,
     netProfitGrowthYoy: raw?.netProfitGrowthYoy,
@@ -350,13 +354,77 @@ export class AShareDataService {
   }
 
   /**
-   * 按需拉取单只标的全量 K 线（/instruments 已 strip bars 瘦身，17MB → 200KB）
+   * 按需拉取单只标的 K 线（/instruments 已 strip bars 瘦身，17MB → 200KB）
+   * limit: 只取尾部 N 根（如算指标只需 ~400 根）；不传则全量（回测/相关性需要全历史）
    */
-  static async fetchInstrumentBars(code: string): Promise<AShareBar[]> {
-    const res = await fetch(`/api/ashare/bars/${encodeURIComponent(code)}`);
+  static async fetchInstrumentBars(code: string, limit?: number): Promise<AShareBar[]> {
+    const q = limit && limit > 0 ? `?limit=${Math.floor(limit)}` : '';
+    const res = await fetch(`/api/ashare/bars/${encodeURIComponent(code)}${q}`);
     if (!res.ok) return [];
     const data = await res.json();
     return Array.isArray(data?.bars) ? data.bars : [];
+  }
+
+  /** 真实 K 线缓存：key = code@lastBarDate（服务端数据推进/重新同步后 key 变化，自动失效） */
+  private static barsCache = new Map<string, AShareBar[]>();
+  private static barsInflight = new Map<string, Promise<AShareBar[]>>();
+
+  /**
+   * 按需补齐真实 K 线（2026-10-15）。
+   *
+   * 为什么需要：服务端 /instruments 走 stripBars 瘦身，浏览器侧 hydrateInstrument 会用伪随机序列
+   * 兜底（syntheticBars=true）。而 `runRealBacktest` / `correlationEngine` 会过滤 syntheticBars →
+   * 界面上「回测沙盘」与「相关性矩阵」直接是空的；本地重算 EWMAC 也会得到伪标量。
+   *
+   * 语义：只对「服务端确有 parquet 数据」（dataSource==='parquet'）且当前仍是合成 bars 的标的
+   * 拉真实 K 线；全部命中缓存时返回**原数组引用**（调用方可据此跳过 setState，避免 effect 抖动）。
+   * 拉取失败保持 syntheticBars 标记不变（诚实，下次可重试），绝不假装成功。
+   */
+  static async ensureRealBars(
+    instruments: AShareInstrument[],
+    opts: { limit?: number } = {},
+  ): Promise<AShareInstrument[]> {
+    const need = (Array.isArray(instruments) ? instruments : []).filter(
+      (i) => i && i.dataSource === 'parquet' && i.syntheticBars === true,
+    );
+    if (!need.length) return instruments;
+
+    const out = [...instruments];
+    let changed = false;
+    await Promise.all(
+      need.map(async (inst) => {
+        // ⚠️ 缓存 key 必须带 limit（2026-10-15 踩坑）：净值卡片按 limit=90 取尾部、
+        // 回测面板按全量取历史，若 key 只含 code@lastBarDate，先请求的一方会把结果
+        // 缓存给另一方 —— 回测拿到 90 根 → minHistoryBars 不足 → 「0 次再平衡」空回测。
+        const key = `${inst.code}@${inst.lastBarDate ?? ''}@${opts.limit ?? 'full'}`;
+        let bars = this.barsCache.get(key);
+        if (!bars) {
+          let pending = this.barsInflight.get(key);
+          if (!pending) {
+            pending = this.fetchInstrumentBars(inst.code, opts.limit);
+            this.barsInflight.set(key, pending);
+          }
+          try {
+            const fetched = await pending;
+            if (fetched && fetched.length >= 20) {
+              this.barsCache.set(key, fetched);
+              bars = fetched;
+            }
+          } catch {
+            /* 失败不缓存，下次重试 */
+          } finally {
+            this.barsInflight.delete(key);
+          }
+        }
+        if (!bars || bars.length < 20) return;
+        const idx = out.findIndex((x) => x.id === inst.id);
+        if (idx >= 0) {
+          out[idx] = { ...out[idx], bars, syntheticBars: false };
+          changed = true;
+        }
+      }),
+    );
+    return changed ? out : instruments;
   }
 
   /**

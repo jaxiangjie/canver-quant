@@ -53,12 +53,16 @@ export function savePersistedStore(
   ensureDataDir();
   const list = Array.isArray(instruments) ? instruments : [];
   const slim = list.map((inst: any) => {
+    // 派生数据一律不落盘（2026-10-15）：signals 是 loadRealUniverse/finalizeCatalog 每次重算的结果，
+    // 写进 store.json 既让文件膨胀（实测单文件多出 800KB），又会在重启时被 mergeStores 带回来——
+    // 一旦该只当次没能重算（bars 缺失/加载失败），上一轮的旧标量就会冒充当前标量被下发。
+    const { signals, ...rest } = inst || {};
     // 仅在属于初始模板且不是实时同步数据时剥离 bars；实时同步数据保留 bars 避免重启丢失
-    if (TEMPLATE_CODES.has(inst?.code) && inst?.dataSource !== 'realtime_synced') {
-      const { bars, ...rest } = inst;
-      return rest;
+    if (TEMPLATE_CODES.has(rest?.code) && rest?.dataSource !== 'realtime_synced') {
+      const { bars, ...noBars } = rest;
+      return noBars;
     }
-    return inst; // 自定义标的或已实时同步标的：保留 bars，避免重启后被合成为伪数据
+    return rest; // 自定义标的或已实时同步标的：保留 bars，避免重启后被合成为伪数据
   });
 
   // 仅在有数据时才记录删除，避免空列表把全部模板标的误判为"已删除"

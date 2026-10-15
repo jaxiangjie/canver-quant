@@ -5,8 +5,10 @@ import {
 } from './types/ashare';
 import { 
   DEFAULT_CARVER_SETTINGS, 
-  calculatePortfolio 
+  calculatePortfolio,
+  IDM_CORRELATION_WINDOW,
 } from './services/carverEngine';
+import { computeUniverseCorrelationMatrix } from './services/correlationEngine';
 import { AShareDataService, barSyncNotice } from './services/apiClient';
 import { Header } from './components/Header';
 import { ErrorBoundary } from './components/ErrorBoundary';
@@ -143,10 +145,42 @@ export default function App() {
   const activeUniverse = activeUniverseResolution.universe;
   const droppedLegs = activeUniverseResolution.dropped;
 
+  // 真实相关性输入（2026-10-15）：浏览器 universe 的 bars 是合成的（服务端瘦身只下发 barsCount），
+  // correlationEngine 会把标的全部 filter 掉 → IDM 静默退化成 1.00、ρ 退化成 0
+  // （目标股数偏小约 IDM 倍、组合有效波动被低估）。这里按需拉真实 K 线尾部（仅 90 根，够算 60 日收益）
+  // 算一次相关性；**刻意不进 universe state**——截断的 bars 若混进 universe，
+  // 回测会静默把样本期缩短成 90 天。
+  const [corrInputs, setCorrInputs] = useState<{ idm: number; avgCorrelation: number; legCount: number } | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    if (activeUniverse.length < 2) {
+      setCorrInputs(null);
+      return;
+    }
+    AShareDataService.ensureRealBars(activeUniverse, { limit: 90 })
+      .then((withBars) => {
+        if (cancelled) return;
+        const usable = withBars.filter((i) => !i.syntheticBars);
+        if (usable.length < 2) {
+          setCorrInputs(null);
+          return;
+        }
+        const r = computeUniverseCorrelationMatrix(usable, IDM_CORRELATION_WINDOW);
+        setCorrInputs({ idm: r.carverIDM, avgCorrelation: r.averageUniverseCorrelation, legCount: usable.length });
+      })
+      .catch((e) => {
+        console.warn('[App] 真实相关性计算失败，IDM 退回本地口径:', e);
+        if (!cancelled) setCorrInputs(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [activeUniverse]);
+
   // Recalculate Carver Portfolio Positions whenever universe or settings change
   const { positions, summary } = useMemo(() => {
-    return calculatePortfolio(activeUniverse, settings);
-  }, [activeUniverse, settings]);
+    return calculatePortfolio(activeUniverse, settings, corrInputs);
+  }, [activeUniverse, settings, corrInputs]);
 
   // 实时监测：当任意标的波动率/持仓偏离触发卡弗缓冲带边界（withinBuffer === false 且需买卖）
   const breachedPositions = useMemo(() => {
@@ -357,6 +391,7 @@ export default function App() {
             universe={activeUniverse}
             positions={positions}
             settings={settings}
+            effectiveIDM={summary.carverIDM}
             onUpdateSettings={handleUpdateSettings}
             onUpdateInstrumentWeight={handleUpdateInstrumentWeight}
             onUpdateCurrentShares={handleUpdateCurrentShares}

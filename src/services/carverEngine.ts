@@ -15,6 +15,17 @@ import { computeUniverseCorrelationMatrix } from './correlationEngine';
  */
 export const IDM_CORRELATION_WINDOW = 60;
 
+/**
+ * 真实 K 线口径的相关性结果（2026-10-15 新增）。
+ * 浏览器 universe 的 bars 是合成的，`computeUniverseCorrelationMatrix` 会把标的全部过滤 →
+ * IDM 静默退化为 1.00、ρ 退化为 0。调用方（App）用 `ensureRealBars` 拉到真实 K 线后算好传入。
+ */
+export interface PortfolioCorrelationOverride {
+  idm: number;
+  avgCorrelation: number;
+  legCount: number;
+}
+
 export const DEFAULT_CARVER_SETTINGS: CarverSettings = {
   totalCapital: 1000000,         // 100 万元
   targetAnnualVol: 0.18,         // 18% 目标年化波动率（匹配 poorlab 11 腿池 σ_T≈18–22% 画像；受 20% 杠杆帽约束）
@@ -246,7 +257,15 @@ export function calculateInstrumentPosition(
  */
 export function calculatePortfolio(
   universe: AShareInstrument[] = [],
-  settings: CarverSettings = DEFAULT_CARVER_SETTINGS
+  settings: CarverSettings = DEFAULT_CARVER_SETTINGS,
+  /**
+   * 真实 K 线口径的相关性结果（2026-10-15）。浏览器 universe 的 bars 是合成的（服务端瘦身），
+   * `computeUniverseCorrelationMatrix` 会把标的全部 filter 掉 → 静默退化成 IDM=1、ρ=0
+   * （实测：真实口径 ρ=0.112 / IDM 封顶 1.80；浏览器口径参与标的 0 只 / IDM 1.00）。
+   * 后果：目标股数系统性偏小约 IDM 倍，并把组合当成「资产互不相关」而低估有效波动。
+   * 调用方用真实 K 线（`ensureRealBars`）算好后从第三个参数传入。
+   */
+  corrOverride?: PortfolioCorrelationOverride | null,
 ): {
   positions: PositionCalculation[];
   summary: PortfolioSummaryStats;
@@ -260,8 +279,27 @@ export function calculatePortfolio(
   // 相关性矩阵只算一次，IDM 与组合波动实算共用（manual 模式同样需要 rho 来实算组合波动）
   // 执行口径固定 60 日窗口（tribunal D2c2/G3i5：深度分析面板的窗口选择器只影响展示，
   // 不改执行——面板在选择器≠60 时会显式标注此口径，避免「展示值≠执行值」的误导）。
-  const corrResult = safeUniverse.length > 1 ? computeUniverseCorrelationMatrix(safeUniverse, IDM_CORRELATION_WINDOW) : null;
-  const avgUniverseCorrelation = corrResult?.averageUniverseCorrelation ?? 0.30;
+  let corrResult = safeUniverse.length > 1 ? computeUniverseCorrelationMatrix(safeUniverse, IDM_CORRELATION_WINDOW) : null;
+  const overrideUsable =
+    !!corrOverride && corrOverride.legCount > 1 && Number.isFinite(corrOverride.avgCorrelation) && Number.isFinite(corrOverride.idm);
+  if (overrideUsable) {
+    corrResult = {
+      instruments: new Array(corrOverride!.legCount).fill(null),
+      matrix: [],
+      lookbackDays: IDM_CORRELATION_WINDOW,
+      dateRange: { startDate: '', endDate: '' },
+      averageUniverseCorrelation: corrOverride!.avgCorrelation,
+      carverIDM: corrOverride!.idm,
+      summaries: [],
+      pairsRanked: [],
+    } as any;
+  }
+  // ⚠️ 可用性判据必须看「实际参与标的数」，不能只看 corrResult 是否存在：
+  // 全合成 bars 时 corrResult 非空但 instruments=[]、averageUniverseCorrelation=0，
+  // 而 `0 ?? 0.30` 不会回退（?? 只认 null/undefined）→ ρ 被当成 0（资产互不相关），
+  // 组合有效波动被系统性低估。
+  const corrUsable = !!corrResult && (corrResult.instruments?.length ?? 0) > 1;
+  const avgUniverseCorrelation = corrUsable ? corrResult!.averageUniverseCorrelation : 0.30;
   let computedIDM = 1.0;
   if (safeUniverse.length > 1 && settings.useIDM !== false) {
     if (settings.idmMode === 'manual' && typeof settings.manualIDM === 'number') {
