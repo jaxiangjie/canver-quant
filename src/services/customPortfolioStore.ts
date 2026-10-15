@@ -248,6 +248,7 @@ export function portfolioToBundle(
           // 不是组合自身资金。组合资金≠全局资金时，旧文案「对应主页面现金垫」数学失真。
           '；组合内现金 ¥' + cashAmount.toLocaleString() + ' 未入池（现金垫按主页面全局资金口径折算）'
         : ''),
+    targetCapital: portfolio.totalCapital,
     items: legs.map((it, i) => ({
       id: it.code.split('.')[0],
       riskBudgetWeight: Number(weights[i].toFixed(4)),

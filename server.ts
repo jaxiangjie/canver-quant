@@ -117,6 +117,63 @@ app.post('/api/ashare/portfolios', (req, res) => {
   }
 });
 
+// ===== 组合调仓记录历史持久化（data/portfolios/rebalance_history.json） =====
+const REBALANCE_HISTORY_PATH = path.resolve(process.cwd(), 'data', 'portfolios', 'rebalance_history.json');
+
+app.get('/api/ashare/rebalance-history', (req, res) => {
+  try {
+    if (!fs.existsSync(REBALANCE_HISTORY_PATH)) {
+      res.json({ success: true, history: [] });
+      return;
+    }
+    const raw = JSON.parse(fs.readFileSync(REBALANCE_HISTORY_PATH, 'utf8'));
+    let history = Array.isArray(raw?.history) ? raw.history : [];
+    const portfolioId = req.query.portfolioId as string;
+    const code = req.query.code as string;
+    if (portfolioId) {
+      history = history.filter((r: any) => r.portfolioId === portfolioId);
+    }
+    if (code) {
+      const codeClean = code.split('.')[0];
+      history = history.filter((r: any) =>
+        Array.isArray(r.trades) &&
+        r.trades.some((t: any) => t.code === code || t.code?.split('.')[0] === codeClean),
+      );
+    }
+    res.json({ success: true, history });
+  } catch (err: any) {
+    res.status(500).json({ success: false, message: err?.message || 'read rebalance history failed' });
+  }
+});
+
+app.post('/api/ashare/rebalance-history', (req, res) => {
+  try {
+    const { record } = req.body || {};
+    if (!record || !record.id || !Array.isArray(record.trades)) {
+      res.status(400).json({ success: false, message: 'Invalid rebalance record payload (id and trades required)' });
+      return;
+    }
+    fs.mkdirSync(path.dirname(REBALANCE_HISTORY_PATH), { recursive: true });
+    let existing: any[] = [];
+    if (fs.existsSync(REBALANCE_HISTORY_PATH)) {
+      try {
+        const raw = JSON.parse(fs.readFileSync(REBALANCE_HISTORY_PATH, 'utf8'));
+        if (Array.isArray(raw?.history)) existing = raw.history;
+      } catch {
+        existing = [];
+      }
+    }
+    // 写入新记录（最新排最前），按 id 去重，最多保留 500 条
+    const nextHistory = [record, ...existing.filter((r: any) => r.id !== record.id)].slice(0, 500);
+    const tmp = REBALANCE_HISTORY_PATH + '.tmp';
+    fs.writeFileSync(tmp, JSON.stringify({ savedAt: new Date().toISOString(), history: nextHistory }, null, 2), 'utf8');
+    fs.renameSync(tmp, REBALANCE_HISTORY_PATH); // 原子替换
+    res.json({ success: true, count: nextHistory.length, record });
+  } catch (err: any) {
+    res.status(500).json({ success: false, message: err?.message || 'save rebalance history failed' });
+  }
+});
+
 // ===== staging 缓存区（三级数据架构 2026-10-13）=====
 // 拉取池外标的到缓存区（target=staging 待确认入池 / analysis 按需分析临时数据，均 gitignore）
 app.post('/api/ashare/staging/fetch', async (req, res) => {

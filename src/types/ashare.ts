@@ -176,7 +176,34 @@ export interface InstrumentBundle {
   id: string;
   name: string;
   description?: string;
+  targetCapital?: number;   // 组合专属资金规模，如 420000 或 1000000
   items: BundleItem[];
+}
+
+export interface RebalanceTradeItem {
+  code: string;
+  name: string;
+  action: 'BUY' | 'SELL' | 'HOLD';
+  shares: number;            // 调仓变动股数 (推荐买卖股数，如 600 或 400)
+  price: number;             // 当时市价/成交价 (元)
+  turnover: number;          // 调仓成交金额 (元)
+  preShares: number;         // 调仓前持仓股数
+  postShares: number;        // 调仓后最新持仓股数
+  targetShares: number;      // 目标股数
+  reason: string;            // 调仓动因（如 突破12%缓冲带补仓 / 估值修复削峰止盈 / 动量反转）
+}
+
+export interface RebalanceRecord {
+  id: string;
+  portfolioId: string;       // 组合唯一ID
+  portfolioName: string;     // 组合名称
+  timestamp: string;         // ISO 8601
+  displayTime: string;       // 人性化展示时间，如 2026-10-14 15:30
+  totalCapital: number;      // 调仓时的资金口径
+  tradesCount: number;       // 涉及调仓的标的数
+  totalTurnover: number;     // 总换手金额
+  estimatedFee: number;      // 预估交易摩擦成本 (佣金+印花税+滑点)
+  trades: RebalanceTradeItem[]; // 交易清单
 }
 
 export interface PositionCalculation {

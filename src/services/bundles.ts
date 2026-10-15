@@ -16,6 +16,7 @@ export const DEFAULT_BUNDLES: InstrumentBundle[] = [
     id: BALANCED9_ID,
     name: '均衡 ETF 9 腿',
     description: '全天候大类资产配置：宽基/红利/国债/黄金/纳指/日经225（恒科已换为日经225，更低相关性与更长样本）',
+    targetCapital: 1000000,
     items: [
       { id: '510300', riskBudgetWeight: 0.15 },
       { id: '510500', riskBudgetWeight: 0.15 },
@@ -32,6 +33,7 @@ export const DEFAULT_BUNDLES: InstrumentBundle[] = [
     id: SELECT_ETF5_ID,
     name: '精选高夏普 ETF 5 腿 (方案B)',
     description: '优选高夏普与成长红利组合 (500+红利低波+黄金+纳指+300)，剔除负收益拖累；18% 目标波动下 Carver 回测年化约 8.2%（3089 日样本，以回测 Tab 实测为准）',
+    targetCapital: 1000000,
     items: [
       { id: '510500', riskBudgetWeight: 0.30 }, // 中证500ETF
       { id: '512890', riskBudgetWeight: 0.25 }, // 红利低波ETF
@@ -44,6 +46,7 @@ export const DEFAULT_BUNDLES: InstrumentBundle[] = [
     id: POORLAB11_ID,
     name: 'poorlab 11 腿（个股）',
     description: '上一级 pool-lab 定稿生产名单，等权 9.09%/腿，目标 σ_T≈18–22%',
+    targetCapital: 1000000,
     items: [
       { id: '601288', riskBudgetWeight: 1 / 11 }, // 农业银行
       { id: '601318', riskBudgetWeight: 1 / 11 }, // 中国平安

@@ -25,8 +25,8 @@ export const PortfolioSummary: React.FC<PortfolioSummaryProps> = ({ summary, set
         <div className="text-lg font-bold text-white font-mono tabular-nums">
           ¥{summary.totalCapital.toLocaleString('zh-CN')}
         </div>
-        <div className="text-[11px] text-slate-500">
-          目标基准 · 100万独立管理
+        <div className="text-[11px] text-slate-500 font-mono">
+          当前资金口径: ¥{(summary.totalCapital / 10000).toFixed(summary.totalCapital % 10000 === 0 ? 0 : 1)}万 专属管理
         </div>
       </div>
 
