@@ -2,8 +2,9 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { existsSync, readFileSync } from 'node:fs';
 import { AShareInstrument, AShareBar } from '../types/ashare';
-import { INITIAL_INSTRUMENTS } from './mockData';
-import { registryToTemplates, getHfqToMarketFactors } from './stagingData';
+import { INITIAL_INSTRUMENTS } from './mockData';
+import { registryToTemplates, getHfqToMarketFactors, readPoolRegistry } from './stagingData';
+import { scanAndRescaleBreaks, detectSyntheticAmount } from './breakDetection';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -80,12 +81,29 @@ export async function loadRealUniverse(): Promise<AShareInstrument[]> {
 
   // 统一池 registry（2026-10-13 三级数据架构）：staging 晋升的池外标的在此扩展 catalog。
   // registry 条目同样走 parquet 底座路径（staging_to_parquet.py 产出的 schema 与底座一致）。
-  const registryTemplates = registryToTemplates(readPoolRegistryEntries());
-  const hfqToMarketFactor = getHfqToMarketFactors();
+  // 只读一次（tribunal G1c6：旧版 registryToTemplates 与 getHfqToMarketFactors 内部各读
+  // 一次文件，且 realData 还有第三份本地读取实现）。
+  const registryEntries = readPoolRegistry();
+  const registryTemplates = registryToTemplates(registryEntries);
+  const hfqToMarketFactor = getHfqToMarketFactors(registryEntries);
   if (registryTemplates.length) {
     console.log(`[real-data] registry: +${registryTemplates.length} 晋升标的扩展 catalog`);
   }
-  const allTemplates = [...INITIAL_INSTRUMENTS, ...registryTemplates];
+  // 按 code 去重、base 优先（tribunal G1c6）：registry 里出现已在基础 catalog 的 code 时
+  // 旧版会双列——同一标的带两份风险预算进池，组合权重被静默放大。
+  const seenCodes = new Set(INITIAL_INSTRUMENTS.map((t) => stripSuffix(t.code)));
+  const allTemplates: typeof INITIAL_INSTRUMENTS = [...INITIAL_INSTRUMENTS];
+  for (const t of registryTemplates) {
+    const bare = stripSuffix(t.code);
+    if (seenCodes.has(bare)) {
+      console.warn(
+        `[real-data] registry 条目 ${bare}（${t.name}）已在基础 catalog 中，跳过重复登记（防止双份风险预算）`,
+      );
+      continue;
+    }
+    seenCodes.add(bare);
+    allTemplates.push(t);
+  }
 
   for (const tpl of allTemplates) {
     const code = stripSuffix(tpl.code);
@@ -112,82 +130,37 @@ export async function loadRealUniverse(): Promise<AShareInstrument[]> {
     const n = rows.length;
     const closes = rows.map((r) => Number(r.close));
 
-    // ===== 复权断裂检测 + 自动重标定（2026-10-12，数据损坏修复） =====
-    // 背景：上游 parquet 数据湖 2026-09-01 曾重建复权基准——510500 close 2.42→7.88（+225%）、
-    // 513100 11.37→2.23（-80%），而当日 VWAP（amount/volume，不经复权）平稳（7.88→7.91）。
-    // 假跳变使年化波动率虚高至 325%/118%，目标股数被压到正确的 1/14。
-    // 甄别：A股 1996-12-16 起有涨跌停（10%，双创 20%）。ETF 分红除权/上游切换复权基准
-    // 会在序列上留下超界单日跳变——真实行情受涨跌停约束 |收益| 一般 ≤10%，
-    // 故阈值取 12%（抓 510300 在 2026-09-28 的 -21.7% 分红除权断裂；误入者再由 VWAP 甄别放行）；
-    // 1990s 无涨跌停（1994-08 热钱行情、1995-05-18 事件）跳过以防误报。
-    // VWAP 连续性判定：断裂前后 close/vwap 比值整体跳变（>15% 偏离）= 复权基准被切换
-    // 而非真实行情，把断裂日及之后的 OHLC 按 factor 缩回断裂前基准。
-    // （510300 案例：close/vwap 从 1.244 跳到 0.996，跳变 19.9%，VWAP 本身平稳——
-    //  市价没动、是复权体系被换，单日 -21.7% 在 10% 跌停制度下不可能是真实行情。）
-    const BREAK_THRESHOLD = 0.12;
-    const LIMIT_UP_ERA_START = '1996-12-16';
-    const RATIO_DRIFT = 0.15;
-    const RATIO_WINDOW = 10;
-    const vwapAt: number[] = [];
-    for (let i = 0; i < n; i++) {
-      const vol = Number(rows[i].volume);
-      const amt = Number(rows[i].amount);
-      vwapAt.push(vol > 0 && amt > 0 ? amt / vol : 0);
+    // ===== 复权断裂检测 + 自动重标定（逻辑已抽至 breakDetection.ts 单一模块，tribunal G1c6） =====
+    // 背景与阈值语义见 breakDetection.ts 头注释。registry（staging 晋升）标的的 amount
+    // 是伪成交额（volShares×close），无独立 VWAP 锚——模块按数据驱动指纹自动识别为
+    // 合成源并跳过甄别（不让检测器验证自己的输入）；上游换真实 amount 时自动恢复。
+    const scan = scanAndRescaleBreaks(rows as any[], {
+      normDate: (d) => normDate(d),
+    });
+    // closes 数组已被模块就地修复（rows 的 close 同步），重建以让后续 vol/ATR/均线
+    // 全部基于修复后的连续序列计算。
+    const fixedCloses = rows.map((r) => Number(r.close));
+    for (let i = 0; i < n; i++) closes[i] = fixedCloses[i];
+    const rescaledCount = scan.rescaledCount;
+    for (const ev of scan.rescaledEvents) {
+      console.warn(
+        `[real-data] 🔧 ${tpl.name || tpl.id} 复权断裂已重标定: ${ev.date} ` +
+          `(${ev.pct}%)，断裂日及之后 OHLC ×${ev.factor.toFixed(4)} 缩回断裂前基准 ` +
+          `(VWAP 平稳，判定为复权基准切换非真实行情)`,
+      );
     }
-    const medianOf = (xs: number[]): number => {
-      if (!xs.length) return 0;
-      const s = [...xs].sort((a, b) => a - b);
-      return s[Math.floor(s.length / 2)];
-    };
-    let rescaledCount = 0;
-    for (let i = 1; i < n; i++) {
-      const pc = closes[i - 1];
-      if (pc <= 0) continue;
-      if (normDate(rows[i].date) < LIMIT_UP_ERA_START) continue;
-      const r = (closes[i] - pc) / pc;
-      if (Math.abs(r) <= BREAK_THRESHOLD) continue;
-      // VWAP 连续性甄别：断裂前后各取 10 日 close/vwap 比值中位数
-      const before: number[] = [];
-      for (let j = Math.max(0, i - RATIO_WINDOW); j < i; j++) {
-        if (vwapAt[j] > 0) before.push(closes[j] / vwapAt[j]);
-      }
-      const after: number[] = [];
-      for (let j = i; j < Math.min(n, i + RATIO_WINDOW); j++) {
-        if (vwapAt[j] > 0) after.push(closes[j] / vwapAt[j]);
-      }
-      const ratioBefore = medianOf(before);
-      const ratioAfter = medianOf(after);
-      let factor = 0;
-      if (ratioBefore > 0 && ratioAfter > 0 && Math.abs(ratioAfter / ratioBefore - 1) > RATIO_DRIFT) {
-        factor = ratioBefore / ratioAfter; // 复权基准被切换：缩回断裂前基准
-      } else if (before.length === 0 || after.length === 0) {
-        factor = pc / closes[i]; // VWAP 缺失兜底：假设断裂当日真实收益约 0
-      }
-      // guard：仅排除 |factor-1|<5% 的噪声（前后窗口中位数已平滑单日 VWAP 偏离）。
-      // 注意不能沿用 1.5 倍大阈——510300 分红除权断裂 factor≈1.25 正是要修的对象。
-      if (factor > 0 && (factor < 0.95 || factor > 1.05)) {
-        // 重标定：断裂日及之后 OHLC 同步缩放（volume/amount 为原始成交数据，不动）；
-        // closes 同步更新，后续 vol/ATR/均线全部基于修复后的连续序列计算。
-        for (let j = i; j < n; j++) {
-          const row: any = rows[j];
-          row.open = Number(row.open) * factor;
-          row.high = Number(row.high) * factor;
-          row.low = Number(row.low) * factor;
-          row.close = Number(row.close) * factor;
-          closes[j] = Number(row.close);
-        }
-        rescaledCount++;
-        console.warn(
-          `[real-data] 🔧 ${tpl.name || tpl.id} 复权断裂已重标定: ${normDate(rows[i].date)} ` +
-            `(${(r * 100).toFixed(0)}%)，断裂日及之后 OHLC ×${factor.toFixed(4)} 缩回断裂前基准 ` +
-            `(VWAP 平稳，判定为复权基准切换非真实行情)`,
-        );
-      } else {
-        console.warn(
-          `[real-data] ⚠️ ${tpl.name || tpl.id} 疑似复权断裂 ${normDate(rows[i].date)} ` +
-            `(${(r * 100).toFixed(0)}%)，但 VWAP 同向跳动——判为合法极端波动，未重标定，请人工核实`,
-        );
-      }
+    for (const f of scan.findings) {
+      if (f.action !== 'warn-only') continue;
+      const reasonText =
+        f.reason === 'synthetic_source'
+          ? '该标的为 staging 晋升源（合成成交额，无独立 VWAP 锚），无法甄别，保守不动作'
+          : f.reason === 'vwap_window_missing'
+            ? '断裂前后 VWAP 窗口缺失（amount 数据缺或为零），无法甄别，保守不动作'
+            : 'VWAP 同向跳动，判为合法极端波动';
+      console.warn(
+        `[real-data] ⚠️ ${tpl.name || tpl.id} 疑似复权断裂 ${f.date} ` +
+          `(${f.pct}%)：${reasonText}，未重标定，请人工核实`,
+      );
     }
 
     // 年化波动率 = 日收益率样本标准差 × √250
@@ -233,6 +206,17 @@ export async function loadRealUniverse(): Promise<AShareInstrument[]> {
     // 防坑（quant-lab test_carver.py 实测教训）：volume/amount 单位变化会让个别日 VWAP
     // 跳变而 close 不跳，故取「最近 60 个有效 VWAP 的中位数附近最后一个稳定值」，
     // 剔除与中位数差超 50% 的离群日。
+    // ⚠️ 合成 amount 源判定（tribunal G1c4）：registry（staging 晋升）标的的 amount 是
+    // 伪成交额（volShares×close，stagingData 构造），vwapSeries 恒等于 close——此时
+    // vwapPrice 不是独立价格锚而是 currentPrice 的代数副本，名字/类型却声称 VWAP，
+    // 还会喂给 liveMarketSync 的市价兜底链制造"两个源一致"的假象。数据驱动判定：
+    // 合成源不产出 vwapPrice（undefined），兜底链诚实落到下一级（hfq close）。
+    const isSyntheticAmountSource = detectSyntheticAmount(rows as any[]);
+    if (isSyntheticAmountSource && registryEntries.some((e) => e.code === code)) {
+      console.log(
+        `[real-data] ${tpl.name || tpl.id} 为 staging 晋升源（合成成交额）——不产出 vwapPrice（市价锚由 liveMarketSync 快照负责）`,
+      );
+    }
     const vwapSeries: number[] = [];
     for (let i = 0; i < n; i++) {
       const vol = Number(rows[i].volume);
@@ -240,7 +224,7 @@ export async function loadRealUniverse(): Promise<AShareInstrument[]> {
       if (vol > 0 && amt > 0) vwapSeries.push(amt / vol);
     }
     let vwapPrice = 0;
-    if (vwapSeries.length > 0) {
+    if (!isSyntheticAmountSource && vwapSeries.length > 0) {
       const recent = vwapSeries.slice(-60);
       const sorted = [...recent].sort((a, b) => a - b);
       const med = sorted[Math.floor(sorted.length / 2)];
@@ -289,16 +273,31 @@ export async function loadRealUniverse(): Promise<AShareInstrument[]> {
     });
 
     // registry 标的（腾讯 hfq 源）：用 factor 把 hfq 绝对值换算回市价口径。
-    // currentPrice/preClose/vwapPrice/dailyATR 都是「市价口径」展示与定仓输入；
+    // currentPrice/preClose/vwapPrice 是「市价口径」展示与定仓输入（加载时给市价初值，
+    // sync 后由腾讯快照覆盖，双 owner 无害——都是「设为市价」而非「缩放」）；
     // bars 保持 hfq（收益率/波动率口径），factor 只影响绝对值不影响收益率。
-    const factor = hfqToMarketFactor.get(code) ?? 1;
+    // ⚠️ dailyATR 刻意不做 factor 换算（tribunal G1c3）：它是「由 hfq bars 算出的绝对值」，
+    // 市价化唯一 owner 是 liveMarketSync 的 atrScale=市价/hfq末收。此处若也乘 factor，
+    // registry 标的的 ATR 会被缩放两次（f²，f=0.5→25%、f=1.86→3.46 倍），
+    // 腐败值流入 instrumentsStore → computeEWMAC → carverEngine 目标股数。
+    // factor 钳制（tribunal G1c5 消费侧）：hfqToMarketFactor=快照市价/hfq末收，物理上
+    // 只可能在 1 附近小幅偏离（复权因子差）。超出 (0.2, 5) 的值只有两种解释——手改坏了
+    // 或晋升时拿到了错误时点的快照。旧版只校验 >0，一个 100×/0.01× 的坏 factor 会
+    // 静默把所有市价口径字段放大/缩小百倍。此处钳到边界并显式告警。
+    const rawFactor = hfqToMarketFactor.get(code) ?? 1;
+    const factor =
+      rawFactor > 0 && rawFactor < 0.2
+        ? (console.warn(`[real-data] ${code} hfqToMarketFactor=${rawFactor} 异常偏低，钳到 0.2`), 0.2)
+        : rawFactor > 5
+          ? (console.warn(`[real-data] ${code} hfqToMarketFactor=${rawFactor} 异常偏高，钳到 5`), 5)
+          : rawFactor;
     const marketOr = (v: number) => (factor !== 1 && v > 0 ? Number((v * factor).toFixed(4)) : v);
     out.push({
       ...tpl,
       currentPrice: marketOr(currentPrice),
       preClose: marketOr(preClose),
       changePct,
-      dailyATR: marketOr(dailyATR),
+      dailyATR, // hfq 口径——市价化由 liveMarketSync 统一负责（唯一 owner）
       annualizedVol,
       vwapPrice: vwapPrice > 0 ? marketOr(vwapPrice) : undefined,
       bars,
@@ -311,17 +310,4 @@ export async function loadRealUniverse(): Promise<AShareInstrument[]> {
     );
   }
   return out;
-}
-
-/** 读统一池 registry 原始条目（data/pool_registry.json，staging 晋升时写入）；损坏/缺失返回空 */
-function readPoolRegistryEntries(): Parameters<typeof registryToTemplates>[0] {
-  const regPath = path.resolve(process.cwd(), 'data', 'pool_registry.json');
-  if (!existsSync(regPath)) return [];
-  try {
-    const data = JSON.parse(readFileSync(regPath, 'utf-8'));
-    return Array.isArray(data?.entries) ? data.entries : [];
-  } catch (e) {
-    console.warn('[real-data] pool_registry.json 读取失败:', (e as Error).message);
-    return [];
-  }
 }

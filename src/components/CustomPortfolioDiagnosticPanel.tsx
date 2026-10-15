@@ -10,11 +10,14 @@ import { AShareDataService } from '../services/apiClient';
 import {
   loadAllPortfolios,
   saveAllPortfolios,
+  saveAllPortfoliosLocalOnly,
   calculateRiskParityAllocation,
   calculateCarverDynamicAllocation,
   portfolioToBundle,
   fetchServerPortfolios,
   mergePortfolios,
+  runQuickPortfolioBacktest,
+  QuickBacktestResult,
   PORTFOLIO_SELECTED_SLOTS_KEY,
 } from '../services/customPortfolioStore';
 import {
@@ -40,7 +43,51 @@ import {
   Lock,
   Target,
   Upload,
+  LineChart,
 } from 'lucide-react';
+
+/**
+ * 快速回测结果条（2026-10-14 抽出，tribunal Ec6：此前 A/B 两张卡片各内联一份约 50 行的
+ * 逐字副本，配色/格式化/失败文案两份事实源，改一处必漂移）。
+ */
+const QuickBacktestStrip: React.FC<{ result: QuickBacktestResult }> = ({ result }) => {
+  if (result.ok) {
+    return (
+      <div className="px-3 py-2 rounded-lg border flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px] font-mono bg-sky-950/40 border-sky-900/60">
+        <span className="text-sky-300 font-bold">📈 快速回测（Carver 受保护口径）</span>
+        <span className="text-slate-400">
+          {result.startDate} ~ {result.endDate} · {result.totalPoints} 交易日 · {result.tradableCount} 腿可交易
+        </span>
+        <span className="text-slate-300">
+          CAGR{' '}
+          <b className={result.cagrPct >= 0 ? 'text-rose-400' : 'text-emerald-400'}>
+            {result.cagrPct >= 0 ? '+' : ''}
+            {result.cagrPct.toFixed(2)}%
+          </b>
+        </span>
+        <span className="text-slate-300">
+          年化波动 <b className="text-slate-100">{result.annVolPct.toFixed(2)}%</b>
+        </span>
+        <span className="text-slate-300">
+          夏普{' '}
+          <b className={result.sharpe >= 1 ? 'text-emerald-400' : 'text-amber-400'}>{result.sharpe.toFixed(2)}</b>
+        </span>
+        <span className="text-slate-300">
+          最大回撤 <b className="text-emerald-400">{result.maxDrawdownPct.toFixed(2)}%</b>
+        </span>
+        <span className="text-slate-300">
+          卡尔玛{' '}
+          <b className={result.calmar >= 0.5 ? 'text-emerald-400' : 'text-amber-400'}>{result.calmar.toFixed(2)}</b>
+        </span>
+      </div>
+    );
+  }
+  return (
+    <div className="px-3 py-2 rounded-lg border bg-rose-950/40 border-rose-900/60 text-[11px] font-mono">
+      <span className="text-rose-300">⚠️ 回测未完成：{result.message || '未知原因'}</span>
+    </div>
+  );
+};
 
 interface Props {
   universe: AShareInstrument[];
@@ -52,23 +99,30 @@ interface Props {
 export const CustomPortfolioDiagnosticPanel: React.FC<Props> = ({ universe, settings, onImportToMain }) => {
   // 全部自选与官方组合库
   const [portfolios, setPortfolios] = useState<CustomPortfolio[]>(() => loadAllPortfolios());
+  // 最新 portfolios 的 ref 镜像：供挂载合并 effect 在 async 回调里读当前值
+  // （避免把合并逻辑塞进 setState updater——渲染阶段副作用，tribunal Ec1/i4）
+  const portfoliosRef = React.useRef(portfolios);
+  portfoliosRef.current = portfolios;
 
   // 服务端组合库同步（data/portfolios/custom_portfolios.json 随 git 版本管理）：
   // localStorage 先渲染，挂载后拉服务端按 updatedAt 新者胜合并；本地更新则保存时 POST 双写。
+  // ⚠️ 合并路径只写 localStorage、不回 POST（2026-10-14 修正，tribunal Ec1/i4）：
+  // 旧版在 setPortfolios updater（渲染阶段）里调 saveAllPortfolios → POST → 服务端重写
+  // data/portfolios/*.json → Vite watcher full-reload → 点本 tab 被弹回主页（2026-10-13 事故）；
+  // 且合并数据本就来自服务端，回写是无谓的文件变动，还会与编辑路径双写交叠。
   useEffect(() => {
     let cancelled = false;
     (async () => {
       const server = await fetchServerPortfolios();
       if (cancelled || !server.length) return;
-      setPortfolios((prev) => {
-        const merged = mergePortfolios(prev, server);
-        const unchanged =
-          merged.length === prev.length &&
-          merged.every((m, i) => m.id === prev[i]?.id && m.updatedAt === prev[i]?.updatedAt);
-        if (unchanged) return prev;
-        saveAllPortfolios(merged);
-        return merged;
-      });
+      const prev = portfoliosRef.current;
+      const merged = mergePortfolios(prev, server);
+      const unchanged =
+        merged.length === prev.length &&
+        merged.every((m, i) => m.id === prev[i]?.id && m.updatedAt === prev[i]?.updatedAt);
+      if (unchanged) return;
+      saveAllPortfoliosLocalOnly(merged); // 仅本地，不回 POST
+      setPortfolios(merged);
     })();
     return () => {
       cancelled = true;
@@ -312,21 +366,38 @@ export const CustomPortfolioDiagnosticPanel: React.FC<Props> = ({ universe, sett
       alert('该组合中暂无标的，请先添加标的。');
       return;
     }
+    // 拒绝路径（2026-10-14 修正，tribunal Ec5）：零/NaN 资金与纯 CASH 组合不再
+    // 走「静默清零 + 谎报精确满仓」——空 Map 经调用方 `?? it.amount` 原样保留金额、
+    // 纯 CASH 被全部置 0，两种都弹「合计配置 ¥0（0.0%，精确满仓）」。与 Carver handler 同款拒绝。
+    const hasTradable = target.items.some((it) => it.code !== 'CASH');
+    if (!Number.isFinite(target.totalCapital) || target.totalCapital <= 0) {
+      alert('组合资金为 0 或无效，无法配平。请先设置有效的总资金。');
+      return;
+    }
+    if (!hasTradable) {
+      alert('该组合只有现金占位（CASH），没有可配平的权益标的。请先添加标的。');
+      return;
+    }
     const allocationMap = calculateRiskParityAllocation(target.items, target.totalCapital);
     let total = 0;
     let cashCleared = 0;
+    const SUFFIX_NORMAL = '静态波动率反比满仓配平';
+    const SUFFIX_CASH = '静态满仓配平：现金占位已清零（不留现金语义）';
+    // notes 后缀幂等：先剥旧后缀再拼（旧版每点一次追加一次，连点五次备注无限增长）
+    const withSuffix = (notes: string | undefined, suffix: string): string => {
+      const base = (notes || '')
+        .replace(new RegExp('(^|；)' + SUFFIX_NORMAL.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '$'), '')
+        .replace(new RegExp('(^|；)' + SUFFIX_CASH.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '$'), '');
+      return base ? base + '；' + suffix : suffix;
+    };
     const updatedItems = target.items.map((it) => {
       const amt = allocationMap.get(it.id) ?? it.amount;
       if (it.code === 'CASH' && amt === 0) cashCleared++;
       total += amt;
-      const suffix =
-        it.code === 'CASH' && amt === 0
-          ? '静态满仓配平：现金占位已清零（不留现金语义）'
-          : '静态波动率反比满仓配平';
       return {
         ...it,
         amount: amt,
-        notes: (it.notes ? it.notes + '；' : '') + suffix,
+        notes: withSuffix(it.notes, it.code === 'CASH' && amt === 0 ? SUFFIX_CASH : SUFFIX_NORMAL),
       };
     });
 
@@ -334,13 +405,12 @@ export const CustomPortfolioDiagnosticPanel: React.FC<Props> = ({ universe, sett
       prev.map((p) => (p.id === targetId ? { ...p, items: updatedItems, updatedAt: new Date().toISOString() } : p))
     );
 
-    // 配平结果透明化：明确告知总额是否精确满仓，避免「看起来没满仓」的困惑
+    // 配平结果透明化：只有总额确实等于总资金才说「精确满仓」，否则如实报告差额
+    const exact = total === target.totalCapital;
     const ratio = target.totalCapital > 0 ? ((total / target.totalCapital) * 100).toFixed(1) : '0';
     const cashNote = cashCleared > 0 ? '；CASH 占位已清零（满仓配平不留现金）' : '';
     alert(
-      `静态波动率反比配平完成：
-合计配置 ¥${total.toLocaleString()}（${ratio}%，精确满仓）
-` +
+      `静态波动率反比配平完成：\n合计配置 ¥${total.toLocaleString()}（${ratio}%，${exact ? '精确满仓' : '未满仓，差额 ¥' + (target.totalCapital - total).toLocaleString()}）\n` +
         `各标的权重正比于 1/波动率（vol 下限 5%），残差已归入最大权重项${cashNote}`
     );
   };
@@ -384,30 +454,28 @@ export const CustomPortfolioDiagnosticPanel: React.FC<Props> = ({ universe, sett
     if (stagingBusy) return;
     const target = portfolios.find((p) => p.id === portfolioId);
     if (!target || !target.items.length) return;
-    // 复用导入判定拿到 missing 清单（catalog = universe prop，即完整官方池）
+    // 复用导入判定拿到 missing 清单（catalog = universe prop，即完整官方池）。
+    // 注意（2026-10-14，tribunal Ec4）：CASH 已被 portfolioToBundle 剔除并折算为现金垫，
+    // 不会再进 missing——旧版这里比较 split token 与整句 'CASH（现金占位，无行情数据）'
+    // 是恒假的死代码，invalid 变量也算完没人用。池外项即 6 位码，直接过滤即可。
     const result = portfolioToBundle(target, universe);
     if (result.ok || !result.bundle) {
       alert('该组合没有需要拉取的池外标的（全部标的数据可用），可直接点击「导入主页面」。');
       return;
     }
-    const codes = result.missing
-      .map((m) => {
-        const code = m.split(' ')[0];
-        return code === 'CASH（现金占位，无行情数据）' ? 'CASH' : code;
-      })
-      .filter((c) => c !== 'CASH' && /^\d{6}$/.test(c));
-    const invalid = result.missing.filter((m) => !/^\d{6}/.test(m.split(' ')[0]));
+    const codes = result.missing.map((m) => m.split(' ')[0]).filter((c) => /^\d{6}$/.test(c));
     if (!codes.length) {
       alert(
         '缺失项均无法自动拉取：\n' +
           result.missing.join('\n') +
-          '\n\n（仅支持 6 位 A 股/ETF 代码自动拉取；CASH 占位请移除）'
+          '\n\n（仅支持 6 位 A 股/ETF 代码自动拉取）'
       );
       return;
     }
     setStagingBusy(true);
     try {
-      // 逐个拉取到缓存区
+      // 逐个拉取到缓存区（tribunal Ec3：fetch 加 60s 超时——hung server 时旧版
+      // stagingBusy 永远卡 true；响应形状校验——旧版直接信任 j.report/j.warnings）
       const reports: any[] = [];
       for (const code of codes) {
         try {
@@ -415,10 +483,11 @@ export const CustomPortfolioDiagnosticPanel: React.FC<Props> = ({ universe, sett
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ code, target: 'staging' }),
+            signal: AbortSignal.timeout(60_000),
           });
-          const j = await res.json();
-          if (j.success) reports.push(j.report);
-          else reports.push({ code, name: code, error: j.message || '拉取失败' });
+          const j: any = await res.json().catch(() => null);
+          if (j && j.success && j.report) reports.push(j.report);
+          else reports.push({ code, name: code, error: j?.message || `服务端错误 HTTP ${res.status}` });
         } catch (e: any) {
           reports.push({ code, name: code, error: e?.message || '网络错误' });
         }
@@ -429,10 +498,10 @@ export const CustomPortfolioDiagnosticPanel: React.FC<Props> = ({ universe, sett
         .map(
           (r) =>
             `${r.code} ${r.name}：${r.barCount} 根（${r.firstDate} ~ ${r.lastDate}，${r.coverageYears} 年）` +
-            `· 年化波动 ${(r.annualizedVol * 100).toFixed(1)}%` +
+            `· 年化波动 ${((r.annualizedVol || 0) * 100).toFixed(1)}%` +
             `· 市价 ¥${r.marketPrice}` +
             (r.rescaledCount ? ` · 已重标定 ${r.rescaledCount} 处断裂` : '') +
-            (r.warnings.length ? ` · ⚠️ ${r.warnings.join('；')}` : ''),
+            (Array.isArray(r.warnings) && r.warnings.length ? ` · ⚠️ ${r.warnings.join('；')}` : ''),
         )
         .join('\n');
       if (!okReports.length) {
@@ -443,7 +512,7 @@ export const CustomPortfolioDiagnosticPanel: React.FC<Props> = ({ universe, sett
         `已拉取 ${okReports.length}/${reports.length} 只到缓存区（质量报告）：\n\n${summary}\n` +
           (failed.length ? `\n失败：${failed.map((f) => f.code).join(', ')}\n` : '') +
           `\n确认将以上 ${okReports.length} 只晋升入统一池？\n` +
-          `（入池后这些标的的数据源固定为腾讯 hfq，之后请刷新页面再点「导入主页面」）`
+          `（入池后这些标的的数据源固定为腾讯 hfq）`
       );
       if (!proceed) {
         alert('已保留在缓存区（data/cache/staging），可稍后在服务端确认晋升。');
@@ -458,10 +527,11 @@ export const CustomPortfolioDiagnosticPanel: React.FC<Props> = ({ universe, sett
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ code: r.code }),
+            signal: AbortSignal.timeout(60_000),
           });
-          const j = await res.json();
-          if (j.success) promoted.push(`${r.code} ${r.name}`);
-          else promoteFailed.push(`${r.code}: ${j.message}`);
+          const j: any = await res.json().catch(() => null);
+          if (j && j.success) promoted.push(`${r.code} ${r.name}`);
+          else promoteFailed.push(`${r.code}: ${j?.message || `服务端错误 HTTP ${res.status}`}`);
         } catch (e: any) {
           promoteFailed.push(`${r.code}: ${e?.message || '网络错误'}`);
         }
@@ -471,10 +541,66 @@ export const CustomPortfolioDiagnosticPanel: React.FC<Props> = ({ universe, sett
           ? `✅ 已入池 ${promoted.length} 只：${promoted.join('、')}\n（统一池 parquet + pool_registry.json，随 git 版本管理）\n\n`
           : '') +
           (promoteFailed.length ? `❌ 晋升失败：\n${promoteFailed.join('\n')}\n\n` : '') +
-          `下一步：刷新页面（F5）让 catalog 扩展生效，然后重新点击「导入主页面」。`
+          // 2026-10-14 修正（tribunal Cc1 后）：promote 路由已走 finalizeCatalog 共享管线，
+          // catalog 即时刷新——旧文案「刷新页面 F5 让 catalog 扩展生效」已过期。
+          `catalog 已即时刷新，可直接点击「导入主页面」。`
       );
     } finally {
       setStagingBusy(false);
+    }
+  };
+
+  // 快速回测：对自选组合跑真实 walk-forward 回测（Carver 受保护口径），
+  // 复用主页面同款引擎（月度再平衡 + 缓冲带 + 成本模型），展示核心业绩指标。
+  // 结果按 slot+portfolioId+updatedAt 三元组键控（2026-10-14 修正，tribunal V21/Ec2）：
+  // 旧版只按 slot 键控——用户切换槽位组合或编辑标的后，旧组合的 CAGR/夏普/回撤
+  // 会继续挂在新组合卡片下（结果条连组合名都不显示，用户无从察觉）。现在渲染时
+  // 三元组不匹配即整条隐藏；slot 也改由调用方显式传入，不再靠身份比较反推。
+  const [quickBusy, setQuickBusy] = React.useState<'A' | 'B' | null>(null);
+  const [quickResult, setQuickResult] = React.useState<{
+    slot: 'A' | 'B';
+    portfolioId: string;
+    portfolioUpdatedAt: string;
+    result: QuickBacktestResult;
+  } | null>(null);
+  const handleQuickBacktest = async (portfolioId: string, slot: 'A' | 'B') => {
+    if (quickBusy) return;
+    const target = portfolios.find((p) => p.id === portfolioId);
+    if (!target || !target.items.length) {
+      alert('该组合暂无标的，无法回测。');
+      return;
+    }
+    setQuickBusy(slot);
+    try {
+      const result = await runQuickPortfolioBacktest(target, universe, settings);
+      setQuickResult({
+        slot,
+        portfolioId: target.id,
+        portfolioUpdatedAt: target.updatedAt,
+        result,
+      });
+      // 失败只挂红条，不再弹 alert（旧版双通知，tribunal Ec2）
+    } catch (e: any) {
+      setQuickResult({
+        slot,
+        portfolioId: target.id,
+        portfolioUpdatedAt: target.updatedAt,
+        result: {
+          ok: false,
+          message: e?.message || '网络或引擎错误',
+          totalPoints: 0,
+          startDate: '',
+          endDate: '',
+          cagrPct: 0,
+          annVolPct: 0,
+          sharpe: 0,
+          maxDrawdownPct: 0,
+          calmar: 0,
+          tradableCount: 0,
+        },
+      });
+    } finally {
+      setQuickBusy(null);
     }
   };
 
@@ -1096,7 +1222,7 @@ export const CustomPortfolioDiagnosticPanel: React.FC<Props> = ({ universe, sett
               <button
                 onClick={() => handleImportToMain(portfolioA.id)}
                 className="flex items-center gap-1 text-[10px] text-indigo-300 hover:text-indigo-200 px-1.5 py-1 rounded bg-indigo-950/60 hover:bg-indigo-900 border border-indigo-900 transition-colors"
-                title="导入主页面：作为「外部导入组合」覆盖式进入定仓工作台（理想仓位，现持仓=0）。含无数据标的（池外/CASH）的组合会被阻止"
+                title="导入主页面：作为「外部导入组合」覆盖式进入定仓工作台（理想仓位，现持仓=0）。含池外无数据标的的组合会被阻止（CASH 现金占位自动折算为现金垫，不阻止导入）"
               >
                 <Upload className="w-3 h-3" />
                 <span>导入主页面</span>
@@ -1125,6 +1251,15 @@ export const CustomPortfolioDiagnosticPanel: React.FC<Props> = ({ universe, sett
                 <Wand2 className="w-3 h-3 text-slate-400" />
                 <span>静态满仓配平</span>
               </button>
+              <button
+                onClick={() => handleQuickBacktest(portfolioA.id, 'A')}
+                disabled={quickBusy !== null}
+                className="flex items-center gap-1 text-[10px] text-sky-300 hover:text-sky-200 px-1.5 py-1 rounded bg-sky-950/60 hover:bg-sky-900 border border-sky-900 transition-colors disabled:opacity-50"
+                title="📈 快速回测：用主页面同款真实回测引擎（月度再平衡 + 缓冲带 + 交易成本）跑该组合的全历史业绩，输出 CAGR/夏普/回撤/卡尔玛"
+              >
+                <LineChart className="w-3 h-3" />
+                <span>{quickBusy === 'A' ? '回测中…' : '快速回测'}</span>
+              </button>
               <div className="text-right font-mono pl-2 border-l border-slate-800">
                 <div className="text-xs text-slate-400">总持仓市值</div>
                 <div className="text-emerald-400 font-bold text-base">
@@ -1133,6 +1268,15 @@ export const CustomPortfolioDiagnosticPanel: React.FC<Props> = ({ universe, sett
               </div>
             </div>
           </div>
+
+          {/* 快速回测结果条 */}
+          {/* 快速回测结果条（三元组过期校验：slot+组合id+updatedAt 全匹配才展示） */}
+          {quickResult &&
+            quickResult.slot === 'A' &&
+            quickResult.portfolioId === portfolioA.id &&
+            quickResult.portfolioUpdatedAt === portfolioA.updatedAt && (
+            <QuickBacktestStrip result={quickResult.result} />
+          )}
 
           {/* 明细列表 */}
           <div className="flex flex-col gap-2 max-h-[380px] overflow-y-auto pr-1">
@@ -1202,7 +1346,7 @@ export const CustomPortfolioDiagnosticPanel: React.FC<Props> = ({ universe, sett
               <button
                 onClick={() => handleImportToMain(portfolioB.id)}
                 className="flex items-center gap-1 text-[10px] text-indigo-300 hover:text-indigo-200 px-1.5 py-1 rounded bg-indigo-950/60 hover:bg-indigo-900 border border-indigo-900 transition-colors"
-                title="导入主页面：作为「外部导入组合」覆盖式进入定仓工作台（理想仓位，现持仓=0）。含无数据标的（池外/CASH）的组合会被阻止"
+                title="导入主页面：作为「外部导入组合」覆盖式进入定仓工作台（理想仓位，现持仓=0）。含池外无数据标的的组合会被阻止（CASH 现金占位自动折算为现金垫，不阻止导入）"
               >
                 <Upload className="w-3 h-3" />
                 <span>导入主页面</span>
@@ -1231,6 +1375,15 @@ export const CustomPortfolioDiagnosticPanel: React.FC<Props> = ({ universe, sett
                 <Wand2 className="w-3 h-3 text-slate-400" />
                 <span>静态满仓配平</span>
               </button>
+              <button
+                onClick={() => handleQuickBacktest(portfolioB.id, 'B')}
+                disabled={quickBusy !== null}
+                className="flex items-center gap-1 text-[10px] text-sky-300 hover:text-sky-200 px-1.5 py-1 rounded bg-sky-950/60 hover:bg-sky-900 border border-sky-900 transition-colors disabled:opacity-50"
+                title="📈 快速回测：用主页面同款真实回测引擎（月度再平衡 + 缓冲带 + 交易成本）跑该组合的全历史业绩，输出 CAGR/夏普/回撤/卡尔玛"
+              >
+                <LineChart className="w-3 h-3" />
+                <span>{quickBusy === 'B' ? '回测中…' : '快速回测'}</span>
+              </button>
               <div className="text-right font-mono pl-2 border-l border-slate-800">
                 <div className="text-xs text-slate-400">总持仓市值</div>
                 <div className="text-emerald-400 font-bold text-base">
@@ -1239,6 +1392,15 @@ export const CustomPortfolioDiagnosticPanel: React.FC<Props> = ({ universe, sett
               </div>
             </div>
           </div>
+
+          {/* 快速回测结果条 */}
+          {/* 快速回测结果条（三元组过期校验：slot+组合id+updatedAt 全匹配才展示） */}
+          {quickResult &&
+            quickResult.slot === 'B' &&
+            quickResult.portfolioId === portfolioB.id &&
+            quickResult.portfolioUpdatedAt === portfolioB.updatedAt && (
+            <QuickBacktestStrip result={quickResult.result} />
+          )}
 
           {/* 明细列表 */}
           <div className="flex flex-col gap-2 max-h-[380px] overflow-y-auto pr-1">

@@ -335,12 +335,24 @@ export const CorrelationAnalysisMatrix: React.FC<CorrelationAnalysisMatrixProps>
                   Universe 标的资产相关性分析矩阵 (Pearson Correlation Heatmap)
                 </h2>
                 <span className="px-2 py-0.5 text-[10px] font-mono bg-emerald-950 text-emerald-300 rounded border border-emerald-800">
-                  D3.js 驱动 · 60交易日对数收益率
+                  D3.js 驱动 · {lookbackDays}交易日对数收益率
                 </span>
               </div>
               <p className="text-xs text-slate-400 mt-1">
                 基于 Universe 内全部 8 只标的在过去 <strong>{lookbackDays} 个交易日</strong>（{corrData.dateRange.startDate} 至 {corrData.dateRange.endDate}）的对数收益序列计算皮尔逊相关系数，用于优化卡弗模型的标的互补配置。
               </p>
+              {/* 执行口径诚实标注（tribunal D2c2/G3i5）：本面板的 IDM 展示随选择器变化，
+                  但定仓/回测执行固定 60 日窗口（carverEngine.IDM_CORRELATION_WINDOW）——
+                  不标注会让用户误以为「把窗口切到 250 日，定仓就会用 250 日的 IDM」。 */}
+              {lookbackDays !== 60 && (
+                <p className="text-xs text-amber-400/90 mt-1 flex items-center gap-1.5">
+                  <span>⚠️</span>
+                  <span>
+                    当前展示为 {lookbackDays} 日口径；<strong className="text-amber-300">定仓执行固定使用 60 日窗口</strong>
+                    （此选择器只改变矩阵展示，不改执行参数）。
+                  </span>
+                </p>
+              )}
             </div>
           </div>
 
@@ -393,7 +405,7 @@ export const CorrelationAnalysisMatrix: React.FC<CorrelationAnalysisMatrixProps>
                 Carver Ch.9
               </span>
             </div>
-            <span className="text-[10px] text-slate-500">IDM = 1 / √(1/N + (1-1/N)ρ)（理论值；定仓执行时受 maxIDM 约束）</span>
+            <span className="text-[10px] text-slate-500">IDM = 1 / √(1/N + (1-1/N)ρ)（实算值：ρ 截断至 [-0.2, 1]、IDM 钳制 [1.0, 2.5]——边界外公式不复现该值）</span>
           </div>
 
           <div className="p-4 bg-slate-950/70 border border-slate-800/80 rounded-lg flex flex-col gap-1">

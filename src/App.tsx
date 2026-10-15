@@ -9,6 +9,7 @@ import {
 } from './services/carverEngine';
 import { AShareDataService } from './services/apiClient';
 import { Header } from './components/Header';
+import { ErrorBoundary } from './components/ErrorBoundary';
 import { PortfolioSummary } from './components/PortfolioSummary';
 import { CarverPositionSizer } from './components/CarverPositionSizer';
 import { AddInstrumentModal } from './components/AddInstrumentModal';
@@ -23,7 +24,7 @@ const CustomPortfolioDiagnosticPanel = lazy(() => import('./components/CustomPor
 const DocumentationCenter = lazy(() => import('./components/DocumentationCenter').then(m => ({ default: m.DocumentationCenter })));
 
 // 组合（bundle）层：把 catalog 按组合定义过滤+套权重，得到可切换的测试宇宙
-import { DEFAULT_BUNDLES, BALANCED9_ID, resolveUniverse, InstrumentBundle } from './services/bundles';
+import { DEFAULT_BUNDLES, BALANCED9_ID, resolveUniverseDetailed, InstrumentBundle } from './services/bundles';
 import { IMPORTED_BUNDLE_ID } from './services/customPortfolioStore';
 import { BundleSelector } from './components/BundleSelector';
 
@@ -126,10 +127,12 @@ export default function App() {
     () => bundles.find((b) => b.id === activeBundleId) ?? bundles[0],
     [bundles, activeBundleId],
   );
-  const activeUniverse = useMemo(
-    () => resolveUniverse(universe, activeBundle),
+  const activeUniverseResolution = useMemo(
+    () => resolveUniverseDetailed(universe, activeBundle),
     [universe, activeBundle],
   );
+  const activeUniverse = activeUniverseResolution.universe;
+  const droppedLegs = activeUniverseResolution.dropped;
 
   // Recalculate Carver Portfolio Positions whenever universe or settings change
   const { positions, summary } = useMemo(() => {
@@ -164,29 +167,35 @@ export default function App() {
   };
 
   const handleUpdateInstrumentWeight = (id: string, weight: number) => {
-    // 权重是「组合」的属性：编辑即更新当前激活组合的该标的权重，并持久化到 localStorage
-    setBundles(prev => {
-      const next = prev.map(b =>
+    // 权重是「组合」的属性：编辑即更新当前激活组合的该标的权重（持久化见下方 useEffect）
+    setBundles(prev =>
+      prev.map(b =>
         b.id === activeBundleId
           ? { ...b, items: b.items.map(it => (it.id === id ? { ...it, riskBudgetWeight: weight } : it)) }
           : b,
-      );
-      persistBundles(next);
-      return next;
-    });
+      ),
+    );
   };
 
   // 诊断面板「导入主页面」：以固定 imported 槽位覆盖式接收外部组合（多次导入覆盖不新建），
   // 并切换为主页面激活组合——随后全部按主页面设置计算（Sizer/回测/分析全链路）。
   const handleImportToMain = (bundle: InstrumentBundle) => {
-    setBundles(prev => {
-      const next = [...prev.filter(b => b.id !== IMPORTED_BUNDLE_ID), bundle];
-      persistBundles(next);
-      return next;
-    });
+    // slot 契约强制（tribunal D1c4）：固定槽位覆盖语义。旧版隐含假设「调用方一定传
+    // id==='imported'」——未来任何传入其他 id 的调用方都会造出重复组合（正是该槽位
+    // 要防的 bug）。这里显式归一把契约钉死。
+    const normalized: InstrumentBundle =
+      bundle.id === IMPORTED_BUNDLE_ID ? bundle : { ...bundle, id: IMPORTED_BUNDLE_ID };
+    setBundles(prev => [...prev.filter(b => b.id !== IMPORTED_BUNDLE_ID), normalized]);
     setActiveBundleId(IMPORTED_BUNDLE_ID);
     persistActiveId(IMPORTED_BUNDLE_ID);
   };
+
+  // bundles 持久化（tribunal D1c3）：旧版在 setBundles updater 内调 persistBundles——
+  // updater 是渲染阶段，渲染期写 localStorage 是副作用（严格模式双调用下今天只因
+  // 幂等而无害）。改为状态变化后统一落盘，单一出口。
+  useEffect(() => {
+    persistBundles(bundles);
+  }, [bundles]);
 
   const handleUpdateCurrentShares = (id: string, shares: number) => {
     setUniverse(prev => {
@@ -304,6 +313,24 @@ export default function App() {
 
       {/* 主工作区 View 切换 */}
       <main className="flex-1 max-w-[1520px] w-full mx-auto pb-12">
+        {/* 组合丢腿显式告警（tribunal D1c2/G3i1）：组合引用的标的已不在池中时，
+            引擎按绝对预算低配（剩余权重和 <1），静默会发生「钱只投了一半」——
+            这里明确告知缺哪些腿、影响是什么，绝不悄悄重归一（那会改变用户风险预算）。 */}
+        {droppedLegs.length > 0 && (
+          <div className="mx-4 mt-4 px-4 py-3 rounded-lg border border-amber-500/50 bg-amber-950/40 text-amber-200 text-xs font-sans flex items-start gap-3">
+            <span className="text-amber-400 text-base leading-none">⚠️</span>
+            <div className="flex-1">
+              <div className="font-semibold text-amber-300">
+                当前组合「{activeBundle.name}」有 {droppedLegs.length} 条腿的标的已不在统一池中：
+                <span className="font-mono">{droppedLegs.join('、')}</span>
+              </div>
+              <div className="mt-1 text-amber-200/80">
+                这些腿已被跳过，剩余腿按原风险预算绝对配比执行（不会自动放大填满，故组合整体可能低配、留现金）。
+                如想恢复：在「数据适配」页重新拉取该标的入池，或编辑当前组合移除这些腿。
+              </div>
+            </div>
+          </div>
+        )}
         {activeTab === 'sizer' && (
           <CarverPositionSizer
             universe={activeUniverse}
@@ -316,8 +343,9 @@ export default function App() {
           />
         )}
 
+        <ErrorBoundary name="定仓工作台模块">
         <Suspense fallback={
-          <div className="flex flex-col items-center justify-center p-16 text-slate-400 font-mono gap-3">
+          <div className="flex flex-col items-center justify-center min-h-[60vh] p-16 text-slate-400 font-mono gap-3">
             <div className="w-6 h-6 border-2 border-emerald-500 border-t-transparent rounded-full animate-spin" />
             <span className="text-xs">按需载入模块资源...</span>
           </div>
@@ -375,6 +403,7 @@ export default function App() {
             <DocumentationCenter />
           )}
         </Suspense>
+        </ErrorBoundary>
       </main>
 
       {/* 实时行情同步状态悬浮提示 */}
