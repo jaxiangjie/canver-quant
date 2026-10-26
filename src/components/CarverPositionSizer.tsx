@@ -122,10 +122,26 @@ export const CarverPositionSizer: React.FC<CarverPositionSizerProps> = ({
                 ¥{settings.totalCapital.toLocaleString('zh-CN')}
               </span>
             </div>
+            {/* 精确输入：滑块步长 5 万，改不出 42 万这类数值，所以保留一个可直接输入的框 */}
+            <div className="flex items-center gap-1.5">
+              <input
+                type="number"
+                min={20000}
+                max={100000000}
+                step={10000}
+                value={settings.totalCapital}
+                onChange={(e) => {
+                  const v = Number(e.target.value);
+                  if (Number.isFinite(v) && v > 0) onUpdateSettings({ ...settings, totalCapital: v });
+                }}
+                className="w-28 bg-slate-800 border border-slate-700 rounded px-2 py-1 text-[11px] font-mono text-slate-100 focus:outline-none focus:border-emerald-500"
+              />
+              <span className="text-[10px] text-slate-500">元 · 可直接输入</span>
+            </div>
             <input
               type="range"
               min="200000"
-              max="5000000"
+              max={Math.max(5000000, settings.totalCapital)}
               step="50000"
               value={settings.totalCapital}
               onChange={(e) => onUpdateSettings({ ...settings, totalCapital: Number(e.target.value) })}

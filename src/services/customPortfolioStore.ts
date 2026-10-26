@@ -27,7 +27,7 @@ const barsFetchCache = new Map<string, Promise<AShareInstrument['bars']>>();
 export const OFFICIAL_PORTFOLIOS: CustomPortfolio[] = [
   {
     id: 'official_balanced9',
-    name: '官方基准: 均衡 ETF 9 腿 (全天候)',
+    name: '官方 · 全天候 · 9腿',
     description: '涵盖A股宽基、双创、红利、国债、黄金与海外QDII的标准全天候配置方案',
     totalCapital: 1000000,
     isOfficial: true,
@@ -44,26 +44,15 @@ export const OFFICIAL_PORTFOLIOS: CustomPortfolio[] = [
       { id: 'ob_9', code: '513520.SH', name: '日经225ETF (QDII)', category: 'qdii_etf', amount: 50000, annualizedVol: 0.24, notes: '海外分散配置' },
     ],
   },
+  // 「实盘现状: 我的当前持仓」预设已于 2026-10-17 移除：项目不再记录真实持仓
+  // （券商 app 才是持仓唯一真相源），组合库只表达「目标结构」。同时它与下面这份
+  // 「股债金 6 腿」有 5 条腿完全相同，留两份近重复组合会稀释 A/B 筛选的意义。
   {
-    id: 'user_actual_holdings',
-    name: '实盘现状: 我的当前持仓 (42万)',
-    description: '重仓恒生科技、航天与机器人，缺乏固收与现金备付垫的现状组合',
-    totalCapital: 420000,
-    isOfficial: false,
-    updatedAt: PRESET_SNAPSHOT_VERSION,
-    items: [
-      { id: 'act_1', code: '513180.SH', name: '恒生科技ETF (QDII)', category: 'qdii_etf', amount: 150000, profitRate: -24.0, profitAmount: -36000, annualizedVol: 0.28, notes: '单标的占比高达35.7%，严重超配高波' },
-      { id: 'act_2', code: '562500.SH', name: '机器人ETF华夏', category: 'sector_etf', amount: 45000, profitRate: -13.3, profitAmount: -6000, annualizedVol: 0.35, notes: '高贝塔制造业赛道' },
-      { id: 'act_3', code: '512660.SH', name: '军工/航天ETF', category: 'sector_etf', amount: 45000, profitRate: -13.3, profitAmount: -6000, annualizedVol: 0.35, notes: '与机器人高度正相关' },
-      { id: 'act_4', code: '512890.SH', name: '红利低波ETF', category: 'broad_etf', amount: 50000, profitRate: 3.0, profitAmount: 1500, annualizedVol: 0.14, notes: '低波动稳健资产' },
-      { id: 'act_5', code: '601288.SH', name: '农业银行 (低估银行)', category: 'stock_cn', amount: 50000, profitRate: 3.0, profitAmount: 1500, annualizedVol: 0.23, notes: '高股息防御资产' },
-      { id: 'act_6', code: '518880.SH', name: '黄金ETF', category: 'commodity_etf', amount: 80000, profitRate: -3.7, profitAmount: -3000, annualizedVol: 0.21, notes: '大宗抗通胀避险资产' },
-    ],
-  },
-  {
+    // id 保留旧值：槽位选择持久化在 localStorage（carver_portfolio_slots_selection_v2），
+    // 改 id 会让已保存的 A/B 槽位失效；id 不面向用户，展示名已改为结构描述。
     id: 'user_optimized_carver',
-    name: '拟定优化: Carver 风险平价平衡方案 (42万)',
-    description: '恒科削减、机器人航天合并控仓、增补国债与现金垫的平衡组合',
+    name: '中港 · 股债金 · 6腿',
+    description: '6 腿股债金结构模板：速算在其基础上生成候选，原模板保留不动',
     totalCapital: 420000,
     isOfficial: false,
     updatedAt: PRESET_SNAPSHOT_VERSION,
@@ -80,6 +69,19 @@ export const OFFICIAL_PORTFOLIOS: CustomPortfolio[] = [
 ];
 
 /**
+ * 已下线的内置预设 id（一次性墓碑，2026-10-17）。
+ *
+ * 「实盘现状: 我的当前持仓」被下线：项目不再记录真实持仓（券商 app 才是唯一真相源），
+ * 组合库只表达目标结构；且它与「中港 · 股债金 · 6腿」5 条腿完全相同，属于近重复。
+ *
+ * ⚠️ 只从 git 库/预设数组里删掉是不够的：mergePortfolios 是按 id 并集合并，
+ * 旧 localStorage 里的副本会把它「复活」，随后一次保存又写回服务端 JSON。
+ * 故在此登记墓碑，loadAllPortfolios 与 mergePortfolios 两侧都过滤。
+ * 待所有客户端迁移完成后可移除本常量。
+ */
+const RETIRED_PRESET_IDS = new Set<string>(['user_actual_holdings']);
+
+/**
  * 加载所有自选组合（内置官方基准 + 用户保存的自选组）
  */
 export function loadAllPortfolios(): CustomPortfolio[] {
@@ -90,7 +92,7 @@ export function loadAllPortfolios(): CustomPortfolio[] {
       if (Array.isArray(parsed) && parsed.length > 0) {
         // 保证官方预设不被彻底丢失
         const officialIds = new Set(OFFICIAL_PORTFOLIOS.filter(p => p.isOfficial).map(p => p.id));
-        const merged = [...parsed];
+        const merged = parsed.filter(p => p && !RETIRED_PRESET_IDS.has(p.id));
         for (const off of OFFICIAL_PORTFOLIOS) {
           if (off.isOfficial && !merged.some(m => m.id === off.id)) {
             merged.unshift(off);
@@ -288,7 +290,8 @@ export function mergePortfolios(local: CustomPortfolio[], server: CustomPortfoli
   };
   local.forEach(put);
   server.forEach(put);
-  return [...byId.values()];
+  // 已下线预设不下发（否则旧 localStorage / 旧 JSON 会把它并回来，见 RETIRED_PRESET_IDS）
+  return [...byId.values()].filter(p => !RETIRED_PRESET_IDS.has(p.id));
 }
 
 /**

@@ -11,7 +11,6 @@ import {
   loadAllPortfolios,
   saveAllPortfolios,
   saveAllPortfoliosLocalOnly,
-  calculateRiskParityAllocation,
   calculateCarverDynamicAllocation,
   portfolioToBundle,
   fetchServerPortfolios,
@@ -38,7 +37,6 @@ import {
   Edit2,
   Check,
   X,
-  Wand2,
   Layers,
   Lock,
   Target,
@@ -140,7 +138,7 @@ export const CustomPortfolioDiagnosticPanel: React.FC<Props> = ({ universe, sett
     } catch {
       /* ignore */
     }
-    return 'user_actual_holdings';
+    return 'user_optimized_carver';
   });
 
   const [slotBId, setSlotBId] = useState<string>(() => {
@@ -153,7 +151,7 @@ export const CustomPortfolioDiagnosticPanel: React.FC<Props> = ({ universe, sett
     } catch {
       /* ignore */
     }
-    return 'user_optimized_carver';
+    return 'official_balanced9';
   });
 
   // 持久化当前槽位选择
@@ -345,7 +343,11 @@ export const CustomPortfolioDiagnosticPanel: React.FC<Props> = ({ universe, sett
     setSlotBId(newId);
   };
 
-  // 🎯 真正的 Carver 系统化动态定仓 (动量标量 + 估值守门 + 单标的封顶 + 现金备付)
+  // 🎯 Carver 动态定仓（动量标量 + 估值守门 + 单标的封顶 + 现金备付）
+  // ⚠️ 2026-10-17：改为「生成候选副本」，不再原地覆盖目标组合。
+  // 旧版直接写回 targetId 的 items —— ① 点一下就把模板组合的金额改掉；
+  // ② 多次速算只能存活最后一次，导致 A/B 两侧其实是"同一组合的两个时间点"，
+  //    筛选失去意义。现在：源组合不动，新候选追加进库并自动落到槽位 B。
   const handleCarverDynamicStrategy = (targetId: string) => {
     const target = portfolios.find((p) => p.id === targetId);
     if (!target || !target.items.length) {
@@ -353,65 +355,29 @@ export const CustomPortfolioDiagnosticPanel: React.FC<Props> = ({ universe, sett
       return;
     }
     const res = calculateCarverDynamicAllocation(target, universe, settings);
-    setPortfolios((prev) =>
-      prev.map((p) => (p.id === targetId ? { ...p, items: res.items, updatedAt: new Date().toISOString() } : p))
-    );
-    alert(res.message);
-  };
 
-  // ⚖️ 纯静态波动率反比平准化 (满仓配平，100% 填满资金)
-  const handleStaticRiskParityAllocation = (targetId: string) => {
-    const target = portfolios.find((p) => p.id === targetId);
-    if (!target || !target.items.length) {
-      alert('该组合中暂无标的，请先添加标的。');
-      return;
-    }
-    // 拒绝路径（2026-10-14 修正，tribunal Ec5）：零/NaN 资金与纯 CASH 组合不再
-    // 走「静默清零 + 谎报精确满仓」——空 Map 经调用方 `?? it.amount` 原样保留金额、
-    // 纯 CASH 被全部置 0，两种都弹「合计配置 ¥0（0.0%，精确满仓）」。与 Carver handler 同款拒绝。
-    const hasTradable = target.items.some((it) => it.code !== 'CASH');
-    if (!Number.isFinite(target.totalCapital) || target.totalCapital <= 0) {
-      alert('组合资金为 0 或无效，无法配平。请先设置有效的总资金。');
-      return;
-    }
-    if (!hasTradable) {
-      alert('该组合只有现金占位（CASH），没有可配平的权益标的。请先添加标的。');
-      return;
-    }
-    const allocationMap = calculateRiskParityAllocation(target.items, target.totalCapital);
-    let total = 0;
-    let cashCleared = 0;
-    const SUFFIX_NORMAL = '静态波动率反比满仓配平';
-    const SUFFIX_CASH = '静态满仓配平：现金占位已清零（不留现金语义）';
-    // notes 后缀幂等：先剥旧后缀再拼（旧版每点一次追加一次，连点五次备注无限增长）
-    const withSuffix = (notes: string | undefined, suffix: string): string => {
-      const base = (notes || '')
-        .replace(new RegExp('(^|；)' + SUFFIX_NORMAL.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '$'), '')
-        .replace(new RegExp('(^|；)' + SUFFIX_CASH.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '$'), '');
-      return base ? base + '；' + suffix : suffix;
+    // 候选命名：<源组合> → 动态 vN（同名自动递增，连点不会出现重名候选）
+    const baseName = `${target.name} → 动态`;
+    const usedNames = new Set(portfolios.map((p) => p.name));
+    let n = 1;
+    let candidateName = `${baseName} v${n}`;
+    while (usedNames.has(candidateName)) candidateName = `${baseName} v${++n}`;
+
+    const candidate: CustomPortfolio = {
+      ...target,
+      id: `user_candidate_${Date.now()}`,
+      name: candidateName,
+      description: `速算候选（Carver 动态定仓）· ${new Date().toISOString().slice(0, 10)} · 源组合「${target.name}」未改动`,
+      isOfficial: false,
+      updatedAt: new Date().toISOString(),
+      items: res.items,
     };
-    const updatedItems = target.items.map((it) => {
-      const amt = allocationMap.get(it.id) ?? it.amount;
-      if (it.code === 'CASH' && amt === 0) cashCleared++;
-      total += amt;
-      return {
-        ...it,
-        amount: amt,
-        notes: withSuffix(it.notes, it.code === 'CASH' && amt === 0 ? SUFFIX_CASH : SUFFIX_NORMAL),
-      };
-    });
 
-    setPortfolios((prev) =>
-      prev.map((p) => (p.id === targetId ? { ...p, items: updatedItems, updatedAt: new Date().toISOString() } : p))
-    );
-
-    // 配平结果透明化：只有总额确实等于总资金才说「精确满仓」，否则如实报告差额
-    const exact = total === target.totalCapital;
-    const ratio = target.totalCapital > 0 ? ((total / target.totalCapital) * 100).toFixed(1) : '0';
-    const cashNote = cashCleared > 0 ? '；CASH 占位已清零（满仓配平不留现金）' : '';
+    setPortfolios((prev) => [...prev, candidate]);
+    setSlotBId(candidate.id);
     alert(
-      `静态波动率反比配平完成：\n合计配置 ¥${total.toLocaleString()}（${ratio}%，${exact ? '精确满仓' : '未满仓，差额 ¥' + (target.totalCapital - total).toLocaleString()}）\n` +
-        `各标的权重正比于 1/波动率（vol 下限 5%），残差已归入最大权重项${cashNote}`
+      `已生成候选「${candidateName}」，源组合未改动。\n\n${res.message}\n\n` +
+        `槽位 B 已切到该候选，可与槽位 A 并排对比后决定导入哪一个。`
     );
   };
 
@@ -719,13 +685,14 @@ export const CustomPortfolioDiagnosticPanel: React.FC<Props> = ({ universe, sett
         <div>
           <div className="flex items-center gap-2">
             <Scale className="w-6 h-6 text-emerald-400" />
-            <h1 className="text-xl font-bold tracking-tight text-white">实盘持仓诊断与自选组合 A/B 对比</h1>
+            <h1 className="text-xl font-bold tracking-tight text-white">组合方案筛选与 A/B 对比</h1>
             <span className="text-xs px-2 py-0.5 rounded bg-emerald-950/80 text-emerald-300 border border-emerald-800 font-mono">
-              全天候多组 PK
+              结构筛选 · 多组 PK
             </span>
           </div>
           <p className="text-xs text-slate-400 mt-1">
-            支持自由新建与管理多套自选组合，下拉菜单任选两套同台 PK 诊断。一键测算波动率平准化配置，生成平稳变轨路径。
+            「Carver 策略定仓」会基于源组合生成候选副本（源组合保持不动），自动落到槽位 B 与槽位 A 并排对比；
+            选定后再导入主页面，由主引擎细化成目标股数。
           </p>
         </div>
 
@@ -814,7 +781,7 @@ export const CustomPortfolioDiagnosticPanel: React.FC<Props> = ({ universe, sett
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-1.5">
               <span className="w-2.5 h-2.5 rounded-full bg-rose-500" />
-              <label className="text-xs font-bold text-white">槽位 A (对比基准/现状组合)</label>
+              <label className="text-xs font-bold text-white">槽位 A (对比基准)</label>
             </div>
             {portfolioA.isOfficial ? (
               <span className="text-[10px] text-slate-500 flex items-center gap-1 font-mono">
@@ -872,7 +839,7 @@ export const CustomPortfolioDiagnosticPanel: React.FC<Props> = ({ universe, sett
                   </option>
                 ))}
             </optgroup>
-            <optgroup label="👤 我的自选与实盘组">
+            <optgroup label="👤 我的组合">
               {portfolios
                 .filter((p) => !p.isOfficial)
                 .map((p) => (
@@ -947,7 +914,7 @@ export const CustomPortfolioDiagnosticPanel: React.FC<Props> = ({ universe, sett
                   </option>
                 ))}
             </optgroup>
-            <optgroup label="👤 我的自选与实盘组">
+            <optgroup label="👤 我的组合">
               {portfolios
                 .filter((p) => !p.isOfficial)
                 .map((p) => (
@@ -989,7 +956,7 @@ export const CustomPortfolioDiagnosticPanel: React.FC<Props> = ({ universe, sett
             {statsA.highVolRiskPct > 65 ? (
               <span className="text-amber-300">⚠️ A风险集中：科技成长贡献了超 70% 波动！</span>
             ) : (
-              <span className="text-emerald-300">✓ 风险平价平准化</span>
+              <span className="text-emerald-300">✓ 风险贡献分散</span>
             )}
           </div>
         </div>
@@ -1244,14 +1211,6 @@ export const CustomPortfolioDiagnosticPanel: React.FC<Props> = ({ universe, sett
                 <span>Carver策略定仓</span>
               </button>
               <button
-                onClick={() => handleStaticRiskParityAllocation(portfolioA.id)}
-                className="flex items-center gap-1 text-[10px] text-slate-400 hover:text-slate-200 px-1.5 py-1 rounded bg-slate-800/80 hover:bg-slate-700 transition-colors"
-                title="⚖️ 纯静态波动率反比满仓配平（强行填满 100% 资金，不留现金）"
-              >
-                <Wand2 className="w-3 h-3 text-slate-400" />
-                <span>静态满仓配平</span>
-              </button>
-              <button
                 onClick={() => handleQuickBacktest(portfolioA.id, 'A')}
                 disabled={quickBusy !== null}
                 className="flex items-center gap-1 text-[10px] text-sky-300 hover:text-sky-200 px-1.5 py-1 rounded bg-sky-950/60 hover:bg-sky-900 border border-sky-900 transition-colors disabled:opacity-50"
@@ -1366,14 +1325,6 @@ export const CustomPortfolioDiagnosticPanel: React.FC<Props> = ({ universe, sett
               >
                 <Target className="w-3.5 h-3.5" />
                 <span>Carver策略定仓</span>
-              </button>
-              <button
-                onClick={() => handleStaticRiskParityAllocation(portfolioB.id)}
-                className="flex items-center gap-1 text-[10px] text-slate-400 hover:text-slate-200 px-1.5 py-1 rounded bg-slate-800/80 hover:bg-slate-700 transition-colors"
-                title="⚖️ 纯静态波动率反比满仓配平（强行填满 100% 资金，不留现金）"
-              >
-                <Wand2 className="w-3 h-3 text-slate-400" />
-                <span>静态满仓配平</span>
               </button>
               <button
                 onClick={() => handleQuickBacktest(portfolioB.id, 'B')}
