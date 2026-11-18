@@ -323,7 +323,14 @@ export function runRealBacktest(
       if (tiltTriggeredThisRebalance) valuationTiltTriggers++;
 
       // --- 卡弗策略目标持仓 ---
-      const { positions } = calculatePortfolio(snapshot, settings);
+      // 复利修正（2026-11-18）：目标仓必须按【当前净值】定规模，而非固定初始资金。
+      // 旧实现每次再平衡都用 settings.totalCapital（=初始 100 万）定仓 —— 持仓名义规模
+      // 恒定，净值增长后敞口占比逐年衰减（poorlab11 实测：期末 ew=198x vs carver=3.9x，
+      // 2026 窗口 carver 实际敞口仅 ~20-30%，年化波动 5.5% vs 目标 18%），而等权基准
+      // 是按当前净值复利的 —— 同一张图里两条曲线口径不一致，A/B 对比全部失真。
+      // 修正：按再平衡日的受保护账本净值（现金+持仓市值）定仓，与 UI 实盘「总资金」语义一致。
+      const navBeforeTrade = cashCarverProt + navOf(0, heldCarver, prices);
+      const { positions } = calculatePortfolio(snapshot, { ...settings, totalCapital: navBeforeTrade });
       const targetCarver = new Map<string, number>();
       // 缓冲带（12% 死区）必须在回测中生效：落在死区内则维持当前持仓、不调仓。
       // 旧实现直接取 targetShares，导致每次再平衡都全量换仓，
