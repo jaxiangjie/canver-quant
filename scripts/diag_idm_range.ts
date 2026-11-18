@@ -53,6 +53,7 @@ const CAP = DEFAULT_CARVER_SETTINGS.maxIDM ?? 1.80;
     idm: r60.carverIDM,
     avgCorrelation: r60.averageUniverseCorrelation,
     legCount: r60.instruments.length,
+    codes: r60.instruments.map((i: any) => i.id),
   });
   console.log(
     `【引擎核对】summary.carverIDM=${summary.carverIDM}  组合年化波动=${summary.portfolioAnnualVol}%  ` +

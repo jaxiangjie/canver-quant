@@ -200,12 +200,17 @@ app.post('/api/ashare/staging/promote', async (req, res) => {
       // 与 initStore 共用完整 catalog 管线（tribunal Cc1）：合并持久化持仓/权重 +
       // 估值/基本面富化 + VWAP 市价兜底。旧版两步刷新会让 promote 后到重启前
       // 用户持仓从内存消失、已删标的复活、fundamentals 丢失。
-      const fresh = await finalizeCatalog(await loadRealUniverse());
-      instrumentsStore = fresh;
+      // catalog 锁（2026-11-18 tribunal）：loadRealUniverse 数秒窗口内，并发的 sync 重载
+      // 可能用旧 registry 整目录覆盖，把新晋标的冲掉 —— 读改写必须整体原子。
+      const fresh = await withCatalogLock(async () => {
+        const f = await finalizeCatalog(await loadRealUniverse());
+        instrumentsStore = f;
+        return f;
+      });
       console.log(
-        `[staging] promoted ${entry.code} ${entry.name} — catalog 现为 ${instrumentsStore.length} 只`,
+        `[staging] promoted ${entry.code} ${entry.name} — catalog 现为 ${fresh.length} 只`,
       );
-      res.json({ success: true, entry, catalogSize: instrumentsStore.length });
+      res.json({ success: true, entry, catalogSize: fresh.length });
     } catch (refreshErr: any) {
       console.error(`[staging] ${entry.code} 已入池，但 catalog 刷新失败:`, refreshErr?.message || refreshErr);
       res.json({
@@ -371,10 +376,27 @@ app.post('/api/ashare/sync-latest', async (req, res) => {
 });
 
 /**
+ * catalog 互斥锁（2026-11-18 tribunal）：instrumentsStore 的「读盘 → finalize → 赋值 → 落盘」
+ * 必须整体原子。此前 promote 刷新、bar-sync 重载、DELETE 重置、启动自动同步各自裸奔 ——
+ * loadRealUniverse 要全量读 22+ 个 parquet（数秒窗口），两条路径交错时后完成者整目录覆盖，
+ * 新晋标的可从活目录消失（会话级，重启才恢复）。syncInFlight 的 key 含 codes/模式，
+ * GET(bars|)、POST 指定 codes、bars:false 是三个 key 拦不住这种交叉；staging 的
+ * withStagingLock 与 dailyBarSync 的 serialize 也互不相认 —— 同一资源三把不相交的锁等于没锁。
+ * 所有「异步读改写 instrumentsStore」的路径统一过这把锁；锁内严禁再获取本锁（无重入）。
+ */
+let catalogChain: Promise<unknown> = Promise.resolve();
+function withCatalogLock<T>(fn: () => Promise<T>): Promise<T> {
+  const next = catalogChain.then(fn, fn);
+  catalogChain = next.catch(() => undefined); // tracked promise 必须挂 catch（Node22 unhandled-rejection=throw）
+  return next;
+}
+
+/**
  * 单飞（single-flight，2026-10-15）：同一时刻对同一 (codes, includeBars) 的重复请求共享同一次执行。
  * 前端已有 useRef 闸门，但多标签页/刷新期间的并发、或外部脚本仍会各发一次 ——
  * 每次要拉 22 只实时快照（约 3s、22 个外部请求），白白重复打行情源。
  * 注意：共享的 promise 必须挂 catch（Node22 unhandled-rejection=throw 会直接杀进程）。
+ * 2026-11-18：key 只用于「去重合并」省网络；不同 key 的写路径由 withCatalogLock 串行化。
  */
 const syncInFlight = new Map<string, Promise<{ barReport: any; snapshotReport: any }>>();
 function runSyncSingleFlight(
@@ -406,32 +428,38 @@ async function runBarSyncThenSnapshot(
   codes: string[] | null,
   includeBars = true,
 ): Promise<{ barReport: any; snapshotReport: any }> {
-  let barReport: any = null;
-  if (includeBars) {
-    barReport = await syncDailyBars(instrumentsStore, { codes: codes || undefined });
-    if (barReport.skipped) {
-      console.log(`[bar-sync] 跳过：${barReport.reason}`);
-    } else {
-      if (barReport.updated > 0) {
-        instrumentsStore = await finalizeCatalog(await loadRealUniverse());
+  // 整个读改写编排进 catalog 锁（2026-11-18 tribunal）：日线重载、快照覆盖、attachSignals、
+  // 落盘是对 instrumentsStore 的连续变更，中途插入的 promote 刷新或启动自动同步会互相
+  // 整目录覆盖（loadRealUniverse 数秒窗口）。锁粒度 = 整个编排（与 dailyBarSync 的
+  // serialize 同哲学：重 IO + 写共享状态的操作绝不并发交叉）。
+  return withCatalogLock(async () => {
+    let barReport: any = null;
+    if (includeBars) {
+      barReport = await syncDailyBars(instrumentsStore, { codes: codes || undefined });
+      if (barReport.skipped) {
+        console.log(`[bar-sync] 跳过：${barReport.reason}`);
+      } else {
+        if (barReport.updated > 0) {
+          instrumentsStore = await finalizeCatalog(await loadRealUniverse());
+        }
+        console.log(
+          `[bar-sync] 日线扫描完成：updated=${barReport.updated}/${barReport.total}` +
+            `（up-to-date=${barReport.upToDate}, failed=${barReport.failed}）` +
+            (barReport.updated > 0 ? '，catalog 已重载' : ''),
+        );
       }
-      console.log(
-        `[bar-sync] 日线扫描完成：updated=${barReport.updated}/${barReport.total}` +
-          `（up-to-date=${barReport.upToDate}, failed=${barReport.failed}）` +
-          (barReport.updated > 0 ? '，catalog 已重载' : ''),
-      );
     }
-  }
-  const pool = codes && codes.length
-    ? instrumentsStore.filter((i) => codes.includes(i.code) || codes.includes(i.id))
-    : instrumentsStore;
-  const { updatedInstruments, report } = await syncAllInstruments(pool);
-  const codeMap = new Map(updatedInstruments.map((u) => [u.id, u]));
-  instrumentsStore = instrumentsStore.map((i) => codeMap.get(i.id) || i);
-  // 快照会更新现价/ATR → 趋势标量必须跟着重算（否则界面拿旧价算出的标量调仓）
-  instrumentsStore = attachSignals(instrumentsStore);
-  savePersistedStore(instrumentsStore, 'sync-latest');
-  return { barReport, snapshotReport: report };
+    const pool = codes && codes.length
+      ? instrumentsStore.filter((i) => codes.includes(i.code) || codes.includes(i.id))
+      : instrumentsStore;
+    const { updatedInstruments, report } = await syncAllInstruments(pool);
+    const codeMap = new Map(updatedInstruments.map((u) => [u.id, u]));
+    instrumentsStore = instrumentsStore.map((i) => codeMap.get(i.id) || i);
+    // 快照会更新现价/ATR → 趋势标量必须跟着重算（否则界面拿旧价算出的标量调仓）
+    instrumentsStore = attachSignals(instrumentsStore);
+    savePersistedStore(instrumentsStore, 'sync-latest');
+    return { barReport, snapshotReport: report };
+  });
 }
 
 app.post('/api/ashare/ingest', (req, res) => {
@@ -476,12 +504,15 @@ app.delete('/api/ashare/store', async (_req, res) => {
   try {
     const removed = deletePersistedStore();
     if (removed) {
-      try {
-        const real = await loadRealUniverse();
-        instrumentsStore = real.length ? real : INITIAL_INSTRUMENTS;
-      } catch {
-        instrumentsStore = INITIAL_INSTRUMENTS;
-      }
+      // catalog 锁（2026-11-18 tribunal）：loadRealUniverse 窗口内不得与其他读改写交错
+      await withCatalogLock(async () => {
+        try {
+          const real = await loadRealUniverse();
+          instrumentsStore = real.length ? real : INITIAL_INSTRUMENTS;
+        } catch {
+          instrumentsStore = INITIAL_INSTRUMENTS;
+        }
+      });
     }
     res.json({ success: true, removed, message: removed ? '持久化数据已清除并重置为原生基础池' : '无持久化数据' });
   } catch (err: any) {
@@ -766,8 +797,13 @@ async function startServer() {
   if (process.env.AUTO_SYNC_ON_START !== 'false') {
     (async () => {
       try {
-        const { updatedInstruments, report } = await syncAllInstruments(instrumentsStore);
-        instrumentsStore = updatedInstruments;
+        // catalog 锁（2026-11-18 tribunal）：syncAllInstruments 数秒窗口内用户可能 promote，
+        // 裸赋值会用启动时的旧 catalog 整目录覆盖、把新晋标的冲掉；读改写整体原子。
+        const { updatedInstruments, report } = await withCatalogLock(async () => {
+          const r = await syncAllInstruments(instrumentsStore);
+          instrumentsStore = r.updatedInstruments;
+          return r;
+        });
         console.log(
           `[auto-sync] snapshot synced: updated=${report.updatedCount}/${report.totalInstruments}` +
             ` latestTradingDate=${report.latestTradingDate || 'n/a'}` +

@@ -1,6 +1,7 @@
 import React, { useState, useMemo, useEffect } from 'react';
 import { PositionCalculation, CarverSettings, AShareBar } from '../types/ashare';
 import { AShareDataService } from '../services/apiClient';
+import { computeAlignedNAV } from '../services/navCurve';
 import { 
   ResponsiveContainer, 
   PieChart, 
@@ -68,6 +69,11 @@ export const PortfolioRiskContributionChart: React.FC<PortfolioRiskContributionC
   // 按需加载全量 K 线：/api/ashare/instruments 已 strip bars（响应 17MB → 200KB），
   // 净值曲线/热力图需要的 bars 经 /api/ashare/bars/:code 按需拉取，本地缓存。
   const [barsMap, setBarsMap] = useState<Map<string, AShareBar[]>>(new Map());
+  // 2026-11-18 tribunal：instrument.bars 是 hydrateInstrument 的 251 根伪随机序列（服务端
+  // strip bars 后的兜底），旧实现 `|| p.instrument.bars` 会拿它画「看起来像真的」净值曲线
+  //（日期标签也是假的），任何一腿 fetch 失败还永久停在假数据上。现在每腿加载状态显式
+  // 区分 loading/ok/failed，未到齐不下菜（渲染闸门见 navReadiness）。
+  const [barsLoadState, setBarsLoadState] = useState<Map<string, 'loading' | 'ok' | 'failed'>>(new Map());
   const neededCodes = useMemo(() => {
     const codes = new Set<string>();
     (Array.isArray(positions) ? positions : []).forEach((p) => {
@@ -80,20 +86,27 @@ export const PortfolioRiskContributionChart: React.FC<PortfolioRiskContributionC
     (async () => {
       for (const code of neededCodes) {
         if (cancelled) return;
+        setBarsLoadState((prev) => (prev.get(code) === 'ok' ? prev : new Map(prev).set(code, 'loading')));
         try {
           // 只要最近 90 根（算 60 日净值窗口足够）——旧实现拉全量：中国石油 4594 根单只 ~1MB，
           // 9 腿顺序拉取既慢又浪费。服务端 ?limit= 会做尾部截断。
           const bars = await AShareDataService.fetchInstrumentBars(code, 90);
-          if (!cancelled && bars.length > 0) {
+          if (cancelled) return;
+          if (bars.length > 0) {
             setBarsMap((prev) => {
               if (prev.has(code)) return prev;
               const next = new Map(prev);
               next.set(code, bars);
               return next;
             });
+            setBarsLoadState((prev) => new Map(prev).set(code, 'ok'));
+          } else {
+            // 0 根也是信息（该腿无真实 K 线），不静默吞掉
+            setBarsLoadState((prev) => new Map(prev).set(code, 'failed'));
           }
         } catch {
-          /* 单只失败不阻塞其余 */
+          /* 单只失败不阻塞其余，但要如实标注 */
+          if (!cancelled) setBarsLoadState((prev) => new Map(prev).set(code, 'failed'));
         }
       }
     })();
@@ -160,78 +173,20 @@ export const PortfolioRiskContributionChart: React.FC<PortfolioRiskContributionC
   // 整条曲线（含基准）在数值上都无意义。现在改为：取各腿共同交易日 → 按日期查表取 close。
   const NAV_LOOKBACK = 60;
   const historicalNAVData = useMemo(() => {
-    const barsOf = (p: any): AShareBar[] => barsMap.get(p.instrument.code) || p.instrument.bars || [];
-    // 只保留真正有持仓的腿：无持仓腿既不该进组合收益，也不该决定共同日期窗口
-    // （旧实现里 513520 持仓为 0 却决定了整条曲线的日期标签）
-    const validPositions = (Array.isArray(positions) ? positions : []).filter(
-      (p) => p && p.instrument && (p.currentShares || 0) > 0 && barsOf(p).length > 30,
+    // 2026-11-18 tribunal：算法内核抽到 src/services/navCurve.ts 的唯一实现 —— 组件与
+    // verify_nav_curve_fix / check_nav_synthetic 两个诊断脚本此前逐行手抄同一算法，
+    // 组件一改脚本就静默在验证一个不存在的算法。bars 只认真实拉取的 barsMap，
+    // 绝不兜底 instrument.bars（那是合成序列）；数据未到齐由 navReadiness 渲染闸门挡住。
+    return computeAlignedNAV(
+      (Array.isArray(positions) ? positions : []).map((p: any) => ({
+        code: p?.instrument?.code,
+        name: p?.instrument?.name,
+        shares: p?.currentShares || 0,
+        price: p?.instrument?.currentPrice || 1,
+        bars: barsMap.get(p?.instrument?.code) || [],
+      })),
+      { lookback: NAV_LOOKBACK, benchCode: '510300.SH' },
     );
-    if (validPositions.length === 0) return [];
-
-    const totalEquity = validPositions.reduce(
-      (acc, p) => acc + (p.currentShares || 0) * (p.instrument.currentPrice || 1),
-      0,
-    );
-
-    // 每腿建立「交易日 → close」索引（按日期对齐的唯一依据）
-    const seriesList = validPositions.map((p) => {
-      const byDate = new Map<string, number>();
-      for (const b of barsOf(p)) {
-        if (b?.tradeDate && b.close > 0) byDate.set(b.tradeDate, b.close);
-      }
-      const mv = (p.currentShares || 0) * (p.instrument.currentPrice || 1);
-      return {
-        inst: p.instrument,
-        weight: totalEquity > 0 ? mv / totalEquity : 1 / validPositions.length,
-        byDate,
-      };
-    });
-
-    // 共同交易日 = 各腿都有数据的日期交集（升序）
-    const allDateLists = seriesList.map((s) => [...s.byDate.keys()]);
-    const [firstList, ...others] = allDateLists;
-    const othersSets = others.map((l) => new Set(l));
-    const commonDates = firstList.filter((d) => othersSets.every((s) => s.has(d))).sort();
-    if (commonDates.length < 2) return [];
-    // +1 根起点用于计算首日收益 → 正好产出 NAV_LOOKBACK 个交易日
-    const window = commonDates.slice(-(NAV_LOOKBACK + 1));
-
-    // 基准：优先沪深300；**组合里没有 510300 时不能拿"第一条腿"冒充沪深300**
-    // （poorlab11 是 11 只个股等权，回退到 series[0] = 农业银行，旧版却把它标成「沪深300 买入持有」）
-    const bench = seriesList.find((s) => s.inst.id === '510300') ?? seriesList[0];
-    const benchLabel =
-      bench.inst.id === '510300' ? '沪深300 买入持有' : `${bench.inst.name} 买入持有 (${String(bench.inst.code).split('.')[0]})`;
-
-    let portAccum = 1.0;
-    let benchAccum = 1.0;
-    const points = [];
-    for (let i = 0; i < window.length; i++) {
-      const date = window[i];
-      if (i > 0) {
-        const prevDate = window[i - 1];
-        let dayReturn = 0;
-        for (const s of seriesList) {
-          const prev = s.byDate.get(prevDate);
-          const curr = s.byDate.get(date);
-          if (prev && curr && prev > 0 && curr > 0) dayReturn += (curr / prev - 1) * s.weight;
-        }
-        portAccum *= 1 + dayReturn;
-        const bp = bench.byDate.get(prevDate);
-        const bc = bench.byDate.get(date);
-        benchAccum *= 1 + (bp && bc && bp > 0 && bc > 0 ? bc / bp - 1 : 0);
-      }
-      points.push({
-        date: date.slice(5), // MM-DD（保持原显示风格）
-        fullDate: date,
-        portfolioNAV: Number(portAccum.toFixed(4)),
-        csi300NAV: Number(benchAccum.toFixed(4)),
-        portfolioReturnPct: Number(((portAccum - 1) * 100).toFixed(2)),
-        csiReturnPct: Number(((benchAccum - 1) * 100).toFixed(2)),
-        benchLabel,
-      });
-    }
-
-    return points;
   }, [positions, barsMap]);
 
   /** 净值曲线实际窗口（真实日期）+ 基准腿身份 + 参与腿数/市值，供 UI 标注 */
@@ -254,6 +209,18 @@ export const PortfolioRiskContributionChart: React.FC<PortfolioRiskContributionC
       exposure: held.reduce((a, p) => a + (p.currentShares || 0) * (p.instrument.currentPrice || 1), 0),
     };
   }, [historicalNAVData, positions]);
+
+  // equity 曲线的数据就绪状态（2026-11-18 tribunal）：任一持仓腿的真实 K 线仍在拉取或
+  // 拉取失败时，净值曲线一律不绘制 —— 宁可显式等待/报缺，也不用合成序列先端一盘假菜。
+  const navReadiness = useMemo(() => {
+    const held = (Array.isArray(positions) ? positions : []).filter(
+      (p) => p && p.instrument && (p.currentShares || 0) > 0,
+    );
+    const stateOf = (code: string) => barsLoadState.get(code) ?? 'loading';
+    const loading = held.filter((p) => stateOf(p.instrument.code) === 'loading').map((p) => p.instrument.name);
+    const failed = held.filter((p) => stateOf(p.instrument.code) === 'failed').map((p) => p.instrument.name);
+    return { loading, failed, ready: held.length > 0 && loading.length === 0 && failed.length === 0 };
+  }, [positions, barsLoadState]);
 
   // Custom tooltips
   const CustomPieTooltip = ({ active, payload }: any) => {
@@ -450,7 +417,22 @@ export const PortfolioRiskContributionChart: React.FC<PortfolioRiskContributionC
             </ResponsiveContainer>
           )}
 
-          {chartMode === 'equity' && (
+          {chartMode === 'equity' && !navReadiness.ready && (
+            <div className="h-full flex flex-col items-center justify-center gap-2 px-6 text-center">
+              {navReadiness.failed.length > 0 && (
+                <div className="text-[11px] text-amber-400">
+                  ⚠️ {navReadiness.failed.join('、')} 的真实 K 线拉取失败 —— 净值曲线暂不绘制（不拿合成数据凑数）
+                </div>
+              )}
+              {navReadiness.loading.length > 0 && (
+                <div className="text-[11px] text-slate-400 animate-pulse">
+                  正在加载真实 K 线：{navReadiness.loading.join('、')} …
+                </div>
+              )}
+            </div>
+          )}
+
+          {chartMode === 'equity' && navReadiness.ready && (
             <ResponsiveContainer width="100%" height="100%">
               <AreaChart data={historicalNAVData} margin={{ top: 5, right: 5, left: -25, bottom: 0 }}>
                 <defs>
@@ -573,22 +555,37 @@ export const PortfolioRiskContributionChart: React.FC<PortfolioRiskContributionC
                   </div>
                 </div>
                 <div className="w-full h-[240px]">
-                  <ResponsiveContainer width="100%" height="100%">
-                    <AreaChart data={historicalNAVData} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
-                      <defs>
-                        <linearGradient id="modalColorPortfolio" x1="0" y1="0" x2="0" y2="1">
-                          <stop offset="5%" stopColor="#10B981" stopOpacity={0.4}/>
-                          <stop offset="95%" stopColor="#10B981" stopOpacity={0.0}/>
-                        </linearGradient>
-                      </defs>
-                      <CartesianGrid strokeDasharray="3 3" stroke="#1E293B" />
-                      <XAxis dataKey="date" tick={{ fill: '#64748B', fontSize: 10 }} />
-                      <YAxis domain={['auto', 'auto']} tick={{ fill: '#64748B', fontSize: 10 }} />
-                      <Tooltip content={<CustomNAVTooltip />} />
-                      <Area type="monotone" dataKey="portfolioNAV" name="卡弗组合" stroke="#10B981" strokeWidth={2.5} fillOpacity={1} fill="url(#modalColorPortfolio)" />
-                      <Area type="monotone" dataKey="csi300NAV" name={navWindow?.benchLabel || '基准'} stroke="#F43F5E" strokeWidth={1.5} fillOpacity={0} strokeDasharray="3 3" />
-                    </AreaChart>
-                  </ResponsiveContainer>
+                  {navReadiness.ready ? (
+                    <ResponsiveContainer width="100%" height="100%">
+                      <AreaChart data={historicalNAVData} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
+                        <defs>
+                          <linearGradient id="modalColorPortfolio" x1="0" y1="0" x2="0" y2="1">
+                            <stop offset="5%" stopColor="#10B981" stopOpacity={0.4}/>
+                            <stop offset="95%" stopColor="#10B981" stopOpacity={0.0}/>
+                          </linearGradient>
+                        </defs>
+                        <CartesianGrid strokeDasharray="3 3" stroke="#1E293B" />
+                        <XAxis dataKey="date" tick={{ fill: '#64748B', fontSize: 10 }} />
+                        <YAxis domain={['auto', 'auto']} tick={{ fill: '#64748B', fontSize: 10 }} />
+                        <Tooltip content={<CustomNAVTooltip />} />
+                        <Area type="monotone" dataKey="portfolioNAV" name="卡弗组合" stroke="#10B981" strokeWidth={2.5} fillOpacity={1} fill="url(#modalColorPortfolio)" />
+                        <Area type="monotone" dataKey="csi300NAV" name={navWindow?.benchLabel || '基准'} stroke="#F43F5E" strokeWidth={1.5} fillOpacity={0} strokeDasharray="3 3" />
+                      </AreaChart>
+                    </ResponsiveContainer>
+                  ) : (
+                    <div className="h-full flex flex-col items-center justify-center gap-2">
+                      {navReadiness.failed.length > 0 && (
+                        <div className="text-[11px] text-amber-400">
+                          ⚠️ {navReadiness.failed.join('、')} 的真实 K 线拉取失败 —— 净值曲线暂不绘制
+                        </div>
+                      )}
+                      {navReadiness.loading.length > 0 && (
+                        <div className="text-[11px] text-slate-400 animate-pulse">
+                          正在加载真实 K 线：{navReadiness.loading.join('、')} …
+                        </div>
+                      )}
+                    </div>
+                  )}
                 </div>
               </div>
 

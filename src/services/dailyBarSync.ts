@@ -18,12 +18,18 @@
  * 收益率取自真实行情。amount 按重叠段的「真实成交额 /（股数×hfq close）」中位数比例还原，
  * 避免用伪成交额污染 ADV。
  *
+ * 历史段唯一事实源是**盘上 parquet**（2026-11-18 tribunal）：syncOne 先整读盘上数据再衔接，
+ * 不消费内存 inst.bars —— 内存快照可能被 scanAndRescaleBreaks（>12% 跳变 rescale 分支）
+ * 就地改写过（仅内存），或落后于外部修复脚本写盘后的真实状态；「历史零改动」由此由
+ * 数据流本身保证，而非靠注释自觉。
+ *
  * 安全护栏（写入即自校验，fail-closed）：
- *   1. 腾讯序列必须与现有 bars 有重叠日，否则拒绝（无法对齐口径）
- *   2. 新 bar 日期严格递增、严格晚于现末根，自然日间隔 ≤ MAX_GAP_DAYS
- *   3. 新 bar 单日收益率 |ret| ≤ MAX_DAILY_MOVE（A股 20cm 上限 + 余量）
- *   4. 写盘前备份原 parquet；写盘后读回校验行数与末根日期
- *   5. 任一只失败只影响该只，报告里显式列出原因，绝不静默
+ *   1. 盘上 parquet 缺失/不可读 → fail-fast（2026-11-18 前置，无盘标的不再白打腾讯）
+ *   2. 腾讯序列必须与现有 bars 有重叠日，否则拒绝（无法对齐口径）
+ *   3. 新 bar 日期严格递增、严格晚于现末根，自然日间隔 ≤ MAX_GAP_DAYS
+ *   4. 新 bar 单日收益率 |ret| ≤ MAX_DAILY_MOVE（A股 20cm 上限 + 余量）
+ *   5. 写盘前备份原 parquet；写盘后读回校验行数与末根日期
+ *   6. 任一只失败只影响该只，报告里显式列出原因，绝不静默
  */
 import { copyFileSync, existsSync, mkdirSync, unlinkSync, writeFileSync } from 'fs';
 import path from 'path';
@@ -33,7 +39,7 @@ import {
   writeBarsJsonToParquet,
   type StagingBar,
 } from './stagingData';
-import { readParquetBarCountAndLastDate } from './parquetProbe';
+import { readParquetBarCountAndLastDate, readParquetBars } from './parquetProbe';
 
 export interface BarSyncItem {
   code: string;
@@ -66,9 +72,13 @@ const CN_SETTLE_MINUTE_OF_DAY = 15 * 60;
 /** 「刚查过且无新增」的短冷却：收盘瞬间连点仍会反复探测腾讯，保留一小段退避防 501 */
 const NO_NEW_DATA_COOLDOWN_MS = 30_000;
 let lastNoNewDataAt = 0;
-const PARQUET_DIR = path.resolve(process.cwd(), 'data', 'parquet', 'daily');
-const BACKUP_DIR = path.resolve(process.cwd(), 'data', 'backup', 'parquet');
-const TMP_DIR = path.resolve(process.cwd(), 'data', 'cache', 'analysis');
+// 目录可用环境变量覆盖（2026-11-18 tribunal）：PARQUET_DIR 与 realData 的 REAL_DATA_DIR
+// 同源 —— 同步写入的目录必须就是统一池读取的目录。测试用独立目录隔离，绝不与生产数据
+// 共享写入路径（test_bar_sync_gate 曾用真实在池标的 + 无隔离目录，fixture 日期一改就会
+// 真实覆写生产底座）。
+const PARQUET_DIR = process.env.REAL_DATA_DIR || path.resolve(process.cwd(), 'data', 'parquet', 'daily');
+const BACKUP_DIR = process.env.DAILY_SYNC_BACKUP_DIR || path.resolve(process.cwd(), 'data', 'backup', 'parquet');
+const TMP_DIR = process.env.DAILY_SYNC_TMP_DIR || path.resolve(process.cwd(), 'data', 'cache', 'analysis');
 
 function bareOf(code: string): string {
   return String(code).replace(/\.(SH|SZ|BJ)$/i, '').slice(0, 6);
@@ -114,13 +124,10 @@ function prevWeekday(from: Date): Date {
   return x;
 }
 
-/** 本地（instruments 内存 = parquet 读回结果）最大交易日 */
-function localMaxBarDate(instruments: AShareInstrument[]): string {
-  return instruments.reduce((max, i) => {
-    const bars = i.bars;
-    const d = bars && bars.length ? bars[bars.length - 1].tradeDate : '';
-    return d > max ? d : max;
-  }, '');
+/** 单只标的的本地末根交易日（空串 = 无 bars） */
+function lastBarDateOf(inst: AShareInstrument): string {
+  const bars = inst.bars;
+  return bars && bars.length ? bars[bars.length - 1].tradeDate : '';
 }
 
 /**
@@ -215,39 +222,64 @@ export function stitchByReturns(
   return { ok: true, merged, appended };
 }
 
-/** 单只标的的日线增量同步（拉取 → 校验 → 备份 → 落盘 → 读回校验） */
+/** 单只标的的日线增量同步（读盘 → 拉取 → 校验 → 备份 → 落盘 → 读回校验） */
 async function syncOne(inst: AShareInstrument): Promise<BarSyncItem> {
   const bare = bareOf(inst.code);
-  const bars = (inst.bars || []) as AShareBar[];
+  const fail = (reason: string): BarSyncItem => ({
+    code: bare,
+    name: inst.name || bare,
+    beforeLast: '',
+    afterLast: '',
+    appended: 0,
+    status: 'failed',
+    reason,
+  });
+
+  // 2026-11-18 tribunal：以**盘上 parquet**为唯一事实源，不再拿内存 inst.bars 当历史段。
+  // 内存快照可能被 realData 加载时的 scanAndRescaleBreaks（>12% 跳变 rescale 分支）就地改写
+  // 而只存在于内存——直接整文件覆写会把启发式改写永久写穿盘上数据；外部修复脚本
+  //（repair_hfq_breaks 等）直接改盘后，内存还是修复前快照，下一次同步会把修复整个冲掉。
+  // 读盘为锚后：写盘内容恒等于「盘上历史 + 收益率延续的新增」，历史零改动由数据流本身保证。
+  // parquet 探测前置也让无盘标的 fail-fast（不再白打腾讯）。
+  const parquetPath = path.join(PARQUET_DIR, `${bare}_hfq.parquet`);
+  const diskBars = await readParquetBars(parquetPath);
+  if (!diskBars || !diskBars.length) {
+    return fail(`盘上 parquet 缺失/无数据：${parquetPath}（需先入池）`);
+  }
+  const diskLast = diskBars[diskBars.length - 1].tradeDate;
+  const memBars = (inst.bars || []) as AShareBar[];
+  const memLast = memBars.length ? memBars[memBars.length - 1].tradeDate : '';
   const base: Omit<BarSyncItem, 'status' | 'appended'> = {
     code: bare,
     name: inst.name || bare,
-    beforeLast: bars.length ? bars[bars.length - 1].tradeDate : '',
-    afterLast: bars.length ? bars[bars.length - 1].tradeDate : '',
+    beforeLast: diskLast,
+    afterLast: diskLast,
   };
-  if (!bars.length) return { ...base, appended: 0, status: 'failed', reason: 'no bars（无本地日线，需先入池）' };
 
   let fresh: StagingBar[];
   // 闸门日期同时用作：① 腾讯请求的 end 槽（防「实时模式」当天 hfq 未定稿）
   // ② fresh 裁剪上限（双保险：即便接口返回了未收盘的当天 bar，也不写盘）
   const gateDate = latestClosedTradingDay();
   try {
-    fresh = (await fetchTencentHfqDaily(bare, 1280, base.beforeLast, gateDate)).filter(
+    fresh = (await fetchTencentHfqDaily(bare, 1280, diskLast, gateDate)).filter(
       (b) => b.tradeDate <= gateDate,
     );
   } catch (e: any) {
     return { ...base, appended: 0, status: 'failed', reason: `腾讯拉取失败：${e?.message || e}` };
   }
 
-  const stitched = stitchByReturns(bars, fresh);
+  const stitched = stitchByReturns(diskBars as unknown as AShareBar[], fresh);
   if (!stitched.ok) return { ...base, appended: 0, status: 'failed', reason: stitched.reason };
-  if (!stitched.appended.length) return { ...base, appended: 0, status: 'up-to-date' };
+  if (!stitched.appended.length) {
+    // 内存与盘上末根不一致时如实提示（内存快照过期或被改写，盘上为准，服务端同步后会重载目录）
+    const note =
+      memLast && memLast !== diskLast
+        ? `内存快照末根 ${memLast} ≠ 盘上末根 ${diskLast}，已按盘上数据为准`
+        : undefined;
+    return { ...base, appended: 0, status: 'up-to-date', reason: note };
+  }
 
   const afterLast = stitched.appended[stitched.appended.length - 1].tradeDate;
-  const parquetPath = path.join(PARQUET_DIR, `${bare}_hfq.parquet`);
-  if (!existsSync(parquetPath)) {
-    return { ...base, appended: 0, status: 'failed', reason: `parquet 缺失：${parquetPath}` };
-  }
 
   // 备份原文件（同日同 code 只备份一次，保留首个快照）
   try {
@@ -286,7 +318,7 @@ async function syncOne(inst: AShareInstrument): Promise<BarSyncItem> {
     };
   }
 
-  let prevClose = bars[bars.length - 1].close;
+  let prevClose = diskBars[diskBars.length - 1].close;
   const newBars = stitched.appended.map((b) => {
     const changePct = Number((((b.close - prevClose) / prevClose) * 100).toFixed(2));
     prevClose = b.close;
@@ -321,12 +353,23 @@ export async function syncDailyBars(
   });
 
   return serialize(async () => {
-    // ── 数据闸门（2026-10-15）：本地 parquet 已推进到「最近已收盘工作日」时，整轮不发起任何网络请求。
-    // 位置刻意放在 serialize 内部：并发的第二次点击会排在上一次之后执行，此时本地已推进，
-    // 于是自然命中闸门 → 零请求返回（这正是「多点几次没事」的机制，而不是靠 30s 任意时间窗）。
+    // ── 数据闸门（2026-10-15 引入；2026-11-18 tribunal 改为逐只判定）：整轮跳过的唯一条件是
+    // 「没有任何一只落后于最近已收盘工作日」。旧判据取全池末根**最大值**——一轮里 2 只因
+    // 腾讯 501 失败后，max 已 ≥ gate，再点同步整轮 skipped 且 reason 谎称「本地已是最新」，
+    // 失败腿当天无法经全局按钮重试（实测 510500/588000 滞后 2 个交易日却谎报最新）。
+    // 逐只判定后：stale 非空就只同步 stale（syncOne 对已最新者本来就是 up-to-date no-op）。
+    // 位置仍在 serialize 内部：并发的第二次点击排在上一次之后执行，本地已推进的腿自然不再
+    // 落后 → 无 stale 时零请求返回（「多点几次没事」的机制不变）。
     const gate = latestClosedTradingDay();
-    const localMax = localMaxBarDate(targets);
-    if (targets.length > 0 && localMax && localMax >= gate) {
+    const staleTargets = targets.filter((i) => {
+      const d = lastBarDateOf(i);
+      return !d || d < gate;
+    });
+    if (targets.length > 0 && staleTargets.length === 0) {
+      const localMax = targets.reduce((m, i) => {
+        const d = lastBarDateOf(i);
+        return d > m ? d : m;
+      }, '');
       return {
         total: targets.length,
         updated: 0,
@@ -334,7 +377,7 @@ export async function syncDailyBars(
         failed: 0,
         skipped: true,
         gateDate: gate,
-        reason: `本地已是最新（末根 ${localMax} ≥ 最近已收盘工作日 ${gate}），已跳过网络请求`,
+        reason: `本地全部 ${targets.length} 只均不落后于最近已收盘工作日 ${gate}（末根 ${localMax}），已跳过网络请求`,
         results: [],
       };
     }
@@ -381,8 +424,9 @@ export async function syncDailyBars(
       failed: results.filter((r) => r.status === 'failed').length,
       results,
     };
-    // 一整轮都没拿到新 bar（市场尚未发布）→ 记下时间，供上面的短冷却使用
-    if (summary.updated === 0) lastNoNewDataAt = Date.now();
+    // 「无新增且零失败」才记冷却（2026-11-18 tribunal）：全轮网络失败（updated=0 且 failed>0）
+    // 不是「市场尚未发布」，给失败盖上「刚刚检查过且无新增」的冷却章会阻止用户立即重试。
+    if (summary.updated === 0 && summary.failed === 0) lastNoNewDataAt = Date.now();
     return summary;
   });
 }

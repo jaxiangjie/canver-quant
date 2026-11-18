@@ -8,11 +8,26 @@
  * 每次同步把当天的假跳变固化一根。其指纹是**跨标的共性**——同一天多只标的同时出现
  * 10~25% 的收益率偏离。因此只修「≥MIN_CODES 只标的同时异常」的日期。
  *
+ * 污染日第二证据（2026-11-18 tribunal）：污染只能来自「当天真的发生过同步写盘」。
+ * data/backup/parquet/<YYYY-MM-DD>/ 是 dailyBarSync 每次写盘前的备份记录 —— 目录不存在的
+ * 日期不可能被同步污染，多半是分红除权扎堆日（≥3 只同日除息即满足 MIN_CODES 的形状），
+ * 一律不修、只列出供人工核实。
+ *
+ * 末根对齐闸门（2026-11-18 tribunal）：腾讯没有的本地末根**默认只告警不删除**——
+ * 腾讯对单 code（ETF/债类常见）更新滞后、或标的停牌时，无条件 pop 会把底座文件的
+ * 真实尾部静默砍掉。--drop-tail 显式开启删除，且必须同时满足：根数 ≤ MAX_TAIL_DROP、
+ * 全部落在 [SINCE, GATE] 同步窗口内。
+ *
+ * 服务运行检测（2026-11-18 tribunal）：--apply 前探测 3000 端口，服务运行时拒绝写盘
+ * （可用 --force 覆盖）——避免与运行中服务的 promote/同步并发写同一批 parquet。
+ *
  * 修法：该日及之后整段 × k，k = (1+腾讯收益率)/(1+本地收益率)。整段等比缩放不改其他日收益率。
  *
  * 用法：
- *   npx tsx scripts/repair_hfq_breaks.ts            # dry-run
- *   npx tsx scripts/repair_hfq_breaks.ts --apply    # 写盘（自动备份 + 读回校验）
+ *   npx tsx scripts/repair_hfq_breaks.ts                            # dry-run
+ *   npx tsx scripts/repair_hfq_breaks.ts --apply                    # 写盘（自动备份 + 读回校验）
+ *   npx tsx scripts/repair_hfq_breaks.ts --apply --drop-tail        # 允许删除腾讯缺失的末根
+ *   npx tsx scripts/repair_hfq_breaks.ts --apply --force            # 服务运行时仍要写盘（不推荐）
  */
 import { readFileSync, writeFileSync, mkdirSync, copyFileSync, readdirSync } from 'node:fs';
 import path from 'node:path';
@@ -21,14 +36,29 @@ import { fetchTencentHfqDaily, writeBarsJsonToParquet } from '../src/services/st
 import { latestClosedTradingDay } from '../src/services/dailyBarSync';
 
 const APPLY = process.argv.includes('--apply');
+const DROP_TAIL = process.argv.includes('--drop-tail');
+const FORCE = process.argv.includes('--force');
 const DIFF_PT = 2;      // 单只当日收益率偏离阈值（百分点）—— 降到 2 是为了抓 511010 的 2.4%/次污染
 const MIN_CODES = 3;    // 同日至少几只异常才判为同步污染日
+const MAX_TAIL_DROP = 5; // --drop-tail 单只最多删除的末根数（超出 = 腾讯对该 code 严重滞后，交人工）
 const SINCE = '2026-10-10'; // 只在这些日期之后找污染（此前为历史遗留，不动）
 const PARQUET_DIR = path.resolve(process.cwd(), 'data', 'parquet', 'daily');
 const STAMP = new Date().toISOString().slice(0, 10);
-const BACKUP_OUT = path.resolve(process.cwd(), 'data', 'backup', 'parquet', `${STAMP}-hfqrepair`);
+const BACKUP_BASE = path.resolve(process.cwd(), 'data', 'backup', 'parquet');
+const BACKUP_OUT = path.resolve(BACKUP_BASE, `${STAMP}-hfqrepair`);
 const TMP_DIR = path.resolve(process.cwd(), 'data', 'cache', 'staging');
+const SERVER_PORT = 3000;
 const GATE = latestClosedTradingDay();
+
+/** 3000 端口有 HTTP 响应 = 工作台服务在跑（start-workbench.bat 同款探测） */
+async function isServerRunning(): Promise<boolean> {
+  try {
+    await fetch(`http://localhost:${SERVER_PORT}/`, { signal: AbortSignal.timeout(2000) });
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 interface Bar { tradeDate: string; open: number; high: number; low: number; close: number; volume: number; amount: number }
 interface Anom { code: string; idx: number; date: string; localRet: number; realRet: number; k: number }
@@ -46,8 +76,34 @@ async function readBars(p: string): Promise<Bar[]> {
 }
 
 const files = readdirSync(PARQUET_DIR).filter((f) => f.endsWith('_hfq.parquet')).sort();
-console.log(`共 ${files.length} 只 | 门禁日 ${GATE} | ${APPLY ? 'APPLY' : 'DRY-RUN'}\n`);
+console.log(`共 ${files.length} 只 | 门禁日 ${GATE} | ${APPLY ? 'APPLY' : 'DRY-RUN'}${DROP_TAIL ? ' +DROP-TAIL' : ''}\n`);
+
+if (APPLY && !FORCE) {
+  const running = await isServerRunning();
+  if (running) {
+    console.error(
+      `❌ 检测到工作台服务正在运行（localhost:${SERVER_PORT} 有响应）。` +
+        `\n   并发写盘可能与服务端的 promote/同步交错；服务内存目录也还是修复前的快照。` +
+        `\n   请先停服再 --apply，或确认风险后加 --force。dry-run 不受影响。`,
+    );
+    process.exit(1);
+  }
+}
 if (APPLY) { mkdirSync(BACKUP_OUT, { recursive: true }); mkdirSync(TMP_DIR, { recursive: true }); }
+
+// 污染日第二证据：同步写盘日期记录（备份目录名 = 纯日期目录，排除 -hfqrepair 等带后缀目录）
+const syncWriteDates = new Set(
+  (() => {
+    try {
+      return readdirSync(BACKUP_BASE)
+        .filter((f) => /^\d{4}-\d{2}-\d{2}$/.test(f))
+        .map((f) => f.slice(0, 10));
+    } catch {
+      return [] as string[];
+    }
+  })(),
+);
+console.log(`同步写盘日期记录（backup 目录）: ${[...syncWriteDates].sort().join(', ') || '(无)'}\n`);
 
 // ── 第一遍：采集所有异常 ──
 const store = new Map<string, { bars: Bar[]; anoms: Anom[]; tc: Map<string, number> }>();
@@ -61,14 +117,31 @@ for (const f of files) {
   const tc = new Map(tcArr.map((b) => [b.tradeDate, b.close]));
   if (!tc.size) { console.log(`${code}: 腾讯序列为空，跳过`); continue; }
 
-  // 末根对齐：腾讯没有的日期 = 本地那根没有定稿依据（多为当天未生成/停牌），直接删除。
-  // 不删的话它会保留自身假跌幅、又被前面几次修正的 k 累积放大（601318 实测剩 143.65 vs 应有 178）。
+  // 末根对齐（2026-11-18 tribunal 闸门化）：腾讯没有的本地末根**默认只告警不删除**。
+  // 旧实现无条件 pop —— 腾讯对单 code 更新滞后（ETF/债类常见）或标的停牌时，会把底座文件
+  // 的真实尾部静默砍掉；「判污染要 ≥MIN_CODES 只一致，删数据却一只说了算」完全不对称。
+  // 现在必须 --drop-tail 显式开启，且同时满足：根数 ≤ MAX_TAIL_DROP、全部落在
+  // [SINCE, GATE] 同步窗口内；不满足则恢复原状并告警，交人工核实。
   const tcLast = [...tc.keys()].sort().pop()!;
-  const dropped: string[] = [];
+  const extraTailBars: Bar[] = [];
   while (bars.length && bars[bars.length - 1].tradeDate > tcLast) {
-    dropped.push(bars.pop()!.tradeDate);
+    extraTailBars.unshift(bars.pop()!); // unshift 保持时间升序
   }
-  if (dropped.length) console.log(`${code}: 腾讯无 ${dropped.join(',')} 的定稿数据 → 删除本地同名末根`);
+  if (extraTailBars.length) {
+    const dates = extraTailBars.map((b) => b.tradeDate);
+    const inWindow = dates.every((d) => d >= SINCE && d <= GATE);
+    if (DROP_TAIL && inWindow && extraTailBars.length <= MAX_TAIL_DROP) {
+      console.log(`${code}: 腾讯无 ${dates.join(',')} 的定稿数据 → 删除本地同名末根`);
+    } else {
+      bars.push(...extraTailBars);
+      const why = !DROP_TAIL
+        ? '未加 --drop-tail'
+        : !inWindow
+          ? `落在窗口外（[${SINCE}, ${GATE}]）`
+          : `根数 ${extraTailBars.length} > MAX_TAIL_DROP=${MAX_TAIL_DROP}`;
+      console.log(`${code}: 腾讯无 ${dates.join(',')} 的定稿数据 → 保留并告警（${why}），请人工核实`);
+    }
+  }
 
   const anoms: Anom[] = [];
   let prev: { c: number; t: number } | null = null;
@@ -89,16 +162,33 @@ for (const f of files) {
 }
 console.log('\n');
 
-// ── 判定污染日：同日异常标的数 ──
+// ── 判定污染日：同日异常标的数 + 第二证据（当天必须有同步写盘记录）──
+// 2026-11-18 tribunal：DIFF_PT=2 + MIN_CODES=3 的形状在分红除权扎堆日（单日几十只除息）
+// 会被误触发，把所有偏离标的整段切到腾讯复权基准（一条序列两种口径）。污染只能来自
+// 「当天真的发生过同步写盘」——备份目录的纯日期目录即写盘记录，零成本第二证据；
+// 无记录的日期一律不修（多半是除权扎堆），只列出供人工核实。
 const byDate = new Map<string, Anom[]>();
 for (const { anoms } of store.values()) for (const a of anoms) {
   if (!byDate.has(a.date)) byDate.set(a.date, []);
   byDate.get(a.date)!.push(a);
 }
-const badDates = [...byDate.entries()].filter(([, v]) => v.length >= MIN_CODES).map(([d]) => d).sort();
-const ignoredDates = [...byDate.keys()].filter((d) => !badDates.includes(d)).sort();
+const badDates = [...byDate.entries()]
+  .filter(([d, v]) => v.length >= MIN_CODES && syncWriteDates.has(d))
+  .map(([d]) => d)
+  .sort();
+const noSyncEvidenceDates = [...byDate.entries()]
+  .filter(([d, v]) => v.length >= MIN_CODES && !syncWriteDates.has(d))
+  .map(([d]) => d)
+  .sort();
+const ignoredDates = [...byDate.keys()].filter((d) => !badDates.includes(d) && !noSyncEvidenceDates.includes(d)).sort();
 
-console.log(`同步污染日（≥${MIN_CODES} 只同时异常）: ${badDates.join(', ') || '(无)'}`);
+console.log(`同步污染日（≥${MIN_CODES} 只同时异常 且 当天有同步写盘记录）: ${badDates.join(', ') || '(无)'}`);
+if (noSyncEvidenceDates.length) {
+  console.log(
+    `疑似除权扎堆日（≥${MIN_CODES} 只异常但当天无同步写盘记录，不修）: ${noSyncEvidenceDates.join(', ')}` +
+      ` —— 如确属污染，请核对备份目录记录是否完整`,
+  );
+}
 if (ignoredDates.length) console.log(`忽略的单只异常日（历史除权/涨跌停，不动）: ${ignoredDates.join(', ')}\n`);
 
 // ── 第二遍：应用修正 ──

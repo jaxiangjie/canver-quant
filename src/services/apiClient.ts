@@ -119,7 +119,14 @@ historicalValuation: Array.isArray(raw?.historicalValuation) && raw.historicalVa
     syntheticBars: !hasRealBars,
     // 真实 K 线元信息透传（2026-10-15）：bars 被服务端剥离时，上面的 bars 是合成的，
     // 展示层必须用这两个字段，不能拿合成 bars 的根数/末根日期当真实数据。
-    barsCount: Number(raw?.barsCount ?? (Array.isArray(raw?.bars) ? raw.bars.length : 0)) || undefined,
+    // barsCount 必须保留合法的 0（2026-11-18 tribunal）：服务端对无 parquet/fallback 标的
+    // 下发 barsCount: 0 =「一根真实 K 线都没有」，是有信息量的值；旧实现 `|| undefined`
+    // 把 0 折叠成 undefined，UI 回退到合成 bars 的 251 根，与 dataSource 徽标自相矛盾。
+    // 0 是信息，undefined 是缺信息，二者不可折叠。
+    barsCount: (() => {
+      const n = Number(raw?.barsCount ?? (Array.isArray(raw?.bars) ? raw.bars.length : 0));
+      return Number.isFinite(n) ? n : undefined;
+    })(),
     lastBarDate: raw?.lastBarDate ?? (hasRealBars ? raw.bars[raw.bars.length - 1].tradeDate : null),
     // 服务端用真实 bars 算好的策略标量：必须透传，否则 hydrate 会把唯一真实的趋势口径丢掉
     signals: raw?.signals,

@@ -24,6 +24,13 @@ export interface PortfolioCorrelationOverride {
   idm: number;
   avgCorrelation: number;
   legCount: number;
+  /**
+   * 算相关性时实际参与腿的 id 码表（去 syntheticBars 后，排序去重）。2026-11-18 tribunal：
+   * 此前 override 与 universe 无身份绑定，App 切换组合的同一帧 useMemo 会拿【上一个组合】的
+   * corrInputs 给【新组合】定仓（9 腿的 IDM/ρ 合法地给 5 腿用，还会随「导入主页面」流出）。
+   * 引擎按「码表与当前 universe 可用腿集合全等」校验，不一致一律拒绝走诚实退化路径。
+   */
+  codes: string[];
 }
 
 export const DEFAULT_CARVER_SETTINGS: CarverSettings = {
@@ -280,8 +287,22 @@ export function calculatePortfolio(
   // 执行口径固定 60 日窗口（tribunal D2c2/G3i5：深度分析面板的窗口选择器只影响展示，
   // 不改执行——面板在选择器≠60 时会显式标注此口径，避免「展示值≠执行值」的误导）。
   let corrResult = safeUniverse.length > 1 ? computeUniverseCorrelationMatrix(safeUniverse, IDM_CORRELATION_WINDOW) : null;
-  const overrideUsable =
-    !!corrOverride && corrOverride.legCount > 1 && Number.isFinite(corrOverride.avgCorrelation) && Number.isFinite(corrOverride.idm);
+  // 2026-11-18 tribunal：override 必须与它所描述的 universe 身份绑定 —— 只有 {idm,ρ,legCount}
+  // 时，调用方在异步相关性完成前的切换帧会用【旧组合】的 override 给【新组合】定仓
+  //（9 腿的 IDM/ρ 合法地给 5 腿用）。子集语义校验：codes 必须非空、与 legCount 自洽、
+  // 且每一条都是【当前 universe】的腿 —— 跨组合的旧 override（码表不属于本组合）一律拒绝，
+  // 走下方 corrUsable=false 的诚实退化路径。注意不能用「universe 去合成腿后的全等」校验：
+  // App 的 universe 本身是 syntheticBars=true 的瘦身标的，override 来自 ensureRealBars 的
+  // 真实副本，全等会把合法生产路径全部拒掉。
+  const overrideUsable = (() => {
+    if (!corrOverride || corrOverride.legCount <= 1) return false;
+    if (!Number.isFinite(corrOverride.avgCorrelation) || !Number.isFinite(corrOverride.idm)) return false;
+    if (!Array.isArray(corrOverride.codes) || corrOverride.codes.length !== corrOverride.legCount) return false;
+    const universeIds = new Set(safeUniverse.map((i) => String(i?.id ?? '')).filter(Boolean));
+    if (universeIds.size === 0) return false;
+    const codes = [...new Set(corrOverride.codes.map(String))];
+    return codes.length === corrOverride.legCount && codes.every((c) => universeIds.has(c));
+  })();
   if (overrideUsable) {
     corrResult = {
       instruments: new Array(corrOverride!.legCount).fill(null),

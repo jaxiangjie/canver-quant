@@ -1,4 +1,4 @@
-import { AShareInstrument, StrategySignals, ValuationPercentileSignal, HistoricalValuationPoint } from '../types/ashare';
+import { AShareInstrument, AssetCategory, StrategySignals, ValuationPercentileSignal, HistoricalValuationPoint } from '../types/ashare';
 
 /**
  * Generate 3-year quarterly historical PE/PB valuation percentile trajectory (12 quarters)
@@ -134,23 +134,39 @@ function calculateEMA(values: number[], span: number): number[] {
  * Robert Carver's signature continuous trend indicator.
  * EWMAC = (EMA(fast) - EMA(slow)) / (Price * dailyVol)
  * Scaled to typical -20 to +20 range.
+ *
+ * opts.atrFloorRatio：ATR/价格 的下限 guard。undefined = ATR 与 closes 同源（hfq atr20，
+ * 比值自洽）→ 不设下限，避免把合法低波当腐败。传入数值时（跨口径回退路径）越下限即兜底。
  */
-function computeEWMAC(closes: number[], fastSpan: number, slowSpan: number, currentATR: number, currentPrice: number): number {
+function computeEWMAC(
+  closes: number[],
+  fastSpan: number,
+  slowSpan: number,
+  currentATR: number,
+  currentPrice: number,
+  opts?: { atrFloorRatio?: number },
+): number {
   if (closes.length < slowSpan) return 0;
-  
+
   const fastEMA = calculateEMA(closes, fastSpan);
   const slowEMA = calculateEMA(closes, slowSpan);
-  
+
   const diff = fastEMA[fastEMA.length - 1] - slowEMA[slowEMA.length - 1];
   // 价格参考优先取与 closes 同口径的最后一根收盘（currentPrice 可能是市价口径，仅作兜底）
   const lastClose = closes[closes.length - 1];
   const priceRef = lastClose > 0 ? lastClose : currentPrice > 0 ? currentPrice : 1;
-  // 防御（2026-10-15 事故）：ATR/价格应有合理量级（日波动约 0.2%~25%）。越界即口径错位或数据腐败
+  // 防御（2026-10-15 事故）：ATR/价格 越界即口径错位或数据腐败
   // （曾出现 dailyATR 被累积缩放至 0.0005 → 分母触底 → 标量全被顶到 ±20），
   // 退化为价格 2% 的保守兜底，宁可低估趋势强度也不让腐败值伪造满仓信号。
+  // 2026-11-18 tribunal 修订：下限不得对 hfq 同源 ATR 生效 —— 原统一 0.2% 下限把国债 ETF
+  // 的合法日波（511010 实测 ATR/price ≈ 0.06%）误判为腐败，分母放大约 33×，标量 0.6 vs 真实 ~20，
+  // 经 bond_etf scalarMultiplier 传导配仓被腰斩。下限改为按资产类别校准、且仅用于
+  // 「跨口径回退」的 instrument.dailyATR 路径（调用方决定）；上限 0.25 保留（单日真实波幅
+  // 不可能超过价格的 25%，超出只有腐败一种解释）。
   let atr = Math.max(0.001, currentATR);
   const atrRatio = atr / Math.max(0.001, priceRef);
-  if (!(atrRatio >= 0.002 && atrRatio <= 0.25)) atr = priceRef * 0.02;
+  const floorRatio = opts?.atrFloorRatio;
+  if (atrRatio > 0.25 || (floorRatio != null && atrRatio < floorRatio)) atr = priceRef * 0.02;
 
   // Carver scalar normalization factor: typically sqrt(fast) * multiplier
   const rawScalar = diff / atr;
@@ -223,9 +239,21 @@ export function evaluateAShareStrategies(
 
   // 1. Carver Multi-horizon EWMAC (8/32, 16/64, 32/128)
   //    合成 K 线时全部归零（不参与组合），而非「算一个假的再钳制」。
-  const ewmac8_32 = trendBarsUnavailable ? 0 : computeEWMAC(closes, 8, 32, currentATR, currentPrice);
-  const ewmac16_64 = trendBarsUnavailable ? 0 : computeEWMAC(closes, 16, 64, currentATR, currentPrice);
-  const ewmac32_128 = trendBarsUnavailable ? 0 : computeEWMAC(closes, 32, 128, currentATR, currentPrice);
+  //    ATR 腐败 guard 的下限按资产类别校准，且仅当 ATR 来自跨口径回退（instrument.dailyATR，
+  //    经 liveMarketSync 市价化）时启用；hfq 同源 atr20 与 closes 自洽，不设下限
+  //    （2026-11-18 tribunal：统一 0.2% 下限把国债 ETF 合法低波当腐败，配仓被腰斩）。
+  const ATR_RATIO_FLOOR: Record<AssetCategory, number> = {
+    bond_etf: 0.0002,      // 债类合法日波 0.02%~0.2%（511010 实测 ≈0.06%）；仍能拦住 2026-10-15 级别的 ~0.01% 腐败
+    commodity_etf: 0.0008, // 黄金日波 ~0.3%~1%
+    broad_etf: 0.002,
+    sector_etf: 0.002,
+    qdii_etf: 0.002,
+    stock_cn: 0.002,
+  };
+  const atrFloorRatio = hfqATR != null ? undefined : ATR_RATIO_FLOOR[instrument.category] ?? 0.002;
+  const ewmac8_32 = trendBarsUnavailable ? 0 : computeEWMAC(closes, 8, 32, currentATR, currentPrice, { atrFloorRatio });
+  const ewmac16_64 = trendBarsUnavailable ? 0 : computeEWMAC(closes, 16, 64, currentATR, currentPrice, { atrFloorRatio });
+  const ewmac32_128 = trendBarsUnavailable ? 0 : computeEWMAC(closes, 32, 128, currentATR, currentPrice, { atrFloorRatio });
 
   // Equal-weight combination across horizons as prescribed by Carver
   const ewmacComposite = (ewmac8_32 * 0.4 + ewmac16_64 * 0.35 + ewmac32_128 * 0.25);
@@ -233,19 +261,37 @@ export function evaluateAShareStrategies(
   // 2. A-Share Absolute Momentum Filter (250-Day / Annual Line)
   // In China A-shares, being below MA250 indicates a bear regime with high probability of persistent down-drift.
   const latestBar = bars.length > 0 ? bars[bars.length - 1] : undefined;
-  const ma250 = latestBar?.ma250 ?? (closes.length >= 200 ? closes.slice(-200).reduce((a, b) => a + b, 0) / 200 : currentPrice);
+  // 口径统一（2026-11-18 tribunal critical）：比较必须同在 hfq 口径。currentPrice 是市价口径
+  //（server finalizeCatalog 第 5 步覆盖为 vwapPrice / liveMarketSync 快照），而 latestBar.ma250
+  // 是 hfq 收盘的滚动均线；后复权因子只增不减，跨口径比较对任何有分红历史的股票几乎恒假
+  //（实测农行 hfq 17.13 > hfq-MA250 15.69 的真实上升趋势被判 false → finalScalar 6.5→2.6，
+  // 部署态全股票腿被系统性打成熊市折价）。改用 bars 最后一根 hfq 收盘对 hfq MA250 ——
+  // 与 computeEWMAC 的 priceRef 同一做法。
+  const lastHfqClose = closes.length > 0 ? closes[closes.length - 1] : undefined;
+  const ma250hfq =
+    latestBar?.ma250 ??
+    (closes.length >= 200 ? closes.slice(-200).reduce((a, b) => a + b, 0) / 200 : undefined);
   // 合成 K 线没有真实 ma250，回退分支用的也是假 closes → 该门槛一律判「通过」（中性），
   // 避免用假数据触发熊市惩罚（把 +标量砍到 0.4x 或负标量压到 -5）。
-  const absoluteMomentumPass = trendBarsUnavailable ? true : currentPrice >= ma250;
+  // 真实样本不足以算 MA250（bar 无 ma250 且 closes < 200 根）时同样诚实中性化，
+  // 不用「对市价」的假比较触发熊市惩罚。
+  const absoluteMomentumPass =
+    trendBarsUnavailable || ma250hfq == null || lastHfqClose == null
+      ? true
+      : lastHfqClose >= ma250hfq;
 
   // 3. Relative Strength (RS) ranking within universe (20-day return vs peers)
   const calc20dReturn = (inst: AShareInstrument) => {
     if (!inst) return 0;
     const instBars = Array.isArray(inst?.bars) ? inst.bars : [];
     const instCloses = instBars.map(b => b.close);
+    // 同口径（2026-11-18）：20 日收益必须用同一序列（hfq closes）首尾计算。原实现拿
+    // currentPrice（市价口径）对 hfq 20 日前收盘，复权因子 f 会把收益扭曲成 1/f - 1
+    //（f=2.3 的农行 ≈ -57% 假崩盘），RS 排名完全失真。
     if (instCloses.length < 21) return inst?.changePct ? inst.changePct / 100 : 0;
     const past = instCloses[instCloses.length - 21];
-    return past > 0 ? ((inst.currentPrice || 1) - past) / past : 0;
+    const now = instCloses[instCloses.length - 1];
+    return past > 0 ? (now - past) / past : 0;
   };
   
   const safeUniverse = Array.isArray(universe) ? universe.filter(Boolean) : [];

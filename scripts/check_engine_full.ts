@@ -36,12 +36,18 @@ async function main() {
       `${p.instrument?.id ?? p.id}\t${(p.instrument?.currentPrice ?? 0).toFixed(2)}` +
       `\t${(p.forecastScalar ?? p.carverForecastScalar ?? '?')}` +
       `\t${(p.rawTargetShares ?? '?')}\t${(p.targetShares ?? '?')}\t${(p.recommendedShares ?? '?')}` +
-      `\t${(p.currentShares ?? 0)}\t${p.bufferStatus ?? p.inBuffer ?? '?'}`
+      `\t${(p.currentShares ?? 0)}\t${p.withinBuffer === true ? 'in' : p.withinBuffer === false ? 'OUT' : '?'}`
     );
   }
   if (result && !Array.isArray(result)) {
+    // 按真实字段读（2026-11-18 tribunal）：summary 的字段是 carverIDM/portfolioAnnualVol/
+    // dailyExpectedRisk，position 的是 withinBuffer —— 旧实现读 idmMultiplier/dailyTotalCashVol/
+    // bufferStatus 全是 undefined，IDM 行打 undefined、buffer 列恒 ?，对账了个寂寞。
+    const s: any = (result as any).summary || {};
     console.log('TOPKEYS:', Object.keys(result).join(','));
-    console.log('IDM:', (result as any).idmMultiplier, 'dailyVol:', (result as any).dailyTotalCashVol ?? (result as any).dailyCashVol);
+    console.log(
+      `IDM: ${s.carverIDM}  组合年化波动: ${s.portfolioAnnualVol}%  组合日风险: ¥${s.dailyExpectedRisk}  杠杆约束: ${s.isLeverageConstrained}`,
+    );
   }
   process.exit(0);
 }

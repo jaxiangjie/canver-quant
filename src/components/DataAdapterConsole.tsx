@@ -421,7 +421,13 @@ print("推送到卡弗工作台状态:", res.status_code, res.json())
                           {(inst.annualizedVol * 100).toFixed(1)}%
                         </td>
                         <td className="py-2 px-3 text-right text-slate-400">
-                          {inst.barsCount ?? inst.bars?.length ?? 0} 根
+                          {/* barsCount=0 是真实信息（服务端一根真实 K 线都没有）——不回退到合成 bars
+                              的 251 根冒充（2026-11-18 tribunal：0 是信息，undefined 是缺信息） */}
+                          {typeof inst.barsCount === 'number'
+                            ? inst.barsCount > 0
+                              ? `${inst.barsCount} 根`
+                              : <span className="text-slate-500">无真实数据</span>
+                            : <span className="text-slate-500">未知</span>}
                         </td>
                         <td className="py-2 px-3 text-center">
                           <span className={`px-1.5 py-0.5 rounded text-[9px] ${

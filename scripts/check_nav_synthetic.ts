@@ -50,18 +50,33 @@ async function curve(legIds: string[], useSynthetic: boolean) {
   return { win, nav, csi, benchCode: bench.code, legs: legs.length, trail, series, totalMv };
 }
 
+// 2026-11-18 tribunal：合成对照分支此前是死代码（全部调用点硬编码 false）——
+// 脚本声称要甄别「什么口径」，但甄别从未被执行。现在两种口径并排跑，并对截图
+// 特征值（10-13 组合 1.105 / 基准 1.1256）做真匹配判定。
+const SHOT_NAV = 1.105;
+const SHOT_CSI = 1.1256;
 for (const b of DEFAULT_BUNDLES) {
   const ids = (b as any).items.map((i: any) => i.id);
-  const r = await curve(ids, false);
-  if (!r) continue;
-  const t = r.trail.find((x) => x.d.endsWith('-10-13')) ?? r.trail[r.trail.length - 1];
-  console.log(
-    `\n【${(b as any).id}】真实 K 线 · 持仓腿=${r.legs} · 总市值 ¥${Math.round(r.totalMv).toLocaleString()} · 窗口 ${r.win[0]}~${r.win[r.win.length - 1]}`,
-  );
-  console.log(`  权重构成: ${r.series.map((s: any) => `${s.code.split('.')[0]} ${(s.weight * 100).toFixed(1)}%`).join('  ')}`);
-  console.log(
-    `  终点 组合 ${r2(r.nav)} (${((r.nav - 1) * 100).toFixed(2)}%)   基准[${r.benchCode}] ${r2(r.csi)} (${((r.csi - 1) * 100).toFixed(2)}%)` +
-      `   ·  10-13 组合 ${r2(t.nav)} (${((t.nav - 1) * 100).toFixed(2)}%)`,
-  );
+  for (const useSynthetic of [false, true] as const) {
+    const r = await curve(ids, useSynthetic);
+    if (!r) continue;
+    const t = r.trail.find((x) => x.d.endsWith('-10-13')) ?? r.trail[r.trail.length - 1];
+    const navHit = Math.abs(r2(t.nav) - SHOT_NAV) < 0.005;
+    const csiHit = Math.abs(r2(t.csi) - SHOT_CSI) < 0.005;
+    const verdict = navHit && csiHit ? ' ←← 匹配截图特征 ✅' : navHit || csiHit ? '（部分匹配截图特征）' : '';
+    console.log(
+      `\n【${(b as any).id}】${useSynthetic ? '合成口径（伪随机序列）' : '真实 K 线口径'} · 持仓腿=${r.legs} · 总市值 ¥${Math.round(r.totalMv).toLocaleString()} · 窗口 ${r.win[0]}~${r.win[r.win.length - 1]}`,
+    );
+    if (!useSynthetic) {
+      console.log(`  权重构成: ${r.series.map((s: any) => `${s.code.split('.')[0]} ${(s.weight * 100).toFixed(1)}%`).join('  ')}`);
+    }
+    console.log(
+      `  终点 组合 ${r2(r.nav)} (${((r.nav - 1) * 100).toFixed(2)}%)   基准[${r.benchCode}] ${r2(r.csi)} (${((r.csi - 1) * 100).toFixed(2)}%)` +
+        `   ·  10-13 组合 ${r2(t.nav)} (${((t.nav - 1) * 100).toFixed(2)}%) / 基准 ${r2(t.csi)}${verdict}`,
+    );
+  }
 }
-console.log('\n（用户截图：10-13 组合 1.105 / 基准 1.1256 —— 那是调仓前的持仓；23:24 已执行调仓，故现值不同）');
+console.log(
+  `\n截图特征：10-13 组合 ${SHOT_NAV} / 基准 ${SHOT_CSI} —— 上方标 ✅ 的「组合×口径」即截图来源；` +
+    `全部不匹配则是调仓前持仓（23:24 已执行调仓，现值不同）`,
+);

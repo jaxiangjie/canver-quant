@@ -150,7 +150,7 @@ export default function App() {
   // （目标股数偏小约 IDM 倍、组合有效波动被低估）。这里按需拉真实 K 线尾部（仅 90 根，够算 60 日收益）
   // 算一次相关性；**刻意不进 universe state**——截断的 bars 若混进 universe，
   // 回测会静默把样本期缩短成 90 天。
-  const [corrInputs, setCorrInputs] = useState<{ idm: number; avgCorrelation: number; legCount: number } | null>(null);
+  const [corrInputs, setCorrInputs] = useState<{ idm: number; avgCorrelation: number; legCount: number; codes: string[] } | null>(null);
   useEffect(() => {
     let cancelled = false;
     if (activeUniverse.length < 2) {
@@ -166,7 +166,14 @@ export default function App() {
           return;
         }
         const r = computeUniverseCorrelationMatrix(usable, IDM_CORRELATION_WINDOW);
-        setCorrInputs({ idm: r.carverIDM, avgCorrelation: r.averageUniverseCorrelation, legCount: usable.length });
+        // codes 身份绑定（2026-11-18 tribunal）：carverEngine 校验码表与当前 universe 可用腿
+        // 全等，切换组合的过渡帧（本异步完成前）不再消费上一个组合的 IDM/ρ。
+        setCorrInputs({
+          idm: r.carverIDM,
+          avgCorrelation: r.averageUniverseCorrelation,
+          legCount: usable.length,
+          codes: usable.map((i) => i.id).sort(),
+        });
       })
       .catch((e) => {
         console.warn('[App] 真实相关性计算失败，IDM 退回本地口径:', e);

@@ -43,6 +43,7 @@ for (const tag of ['balanced9']) {
   const before = calculatePortfolio(legsClient, DEFAULT_CARVER_SETTINGS); // 旧行为：IDM 退化 1.0
   const after = calculatePortfolio(legsClient, DEFAULT_CARVER_SETTINGS, {
     idm: r.carverIDM, avgCorrelation: r.averageUniverseCorrelation, legCount: r.instruments.length,
+    codes: r.instruments.map((i: any) => i.id),
   });
   console.log(`  引擎 IDM      : ${before.summary.carverIDM} → ${after.summary.carverIDM}`);
   console.log(`  组合年化波动  : ${before.summary.effectiveAnnualVol}% → ${after.summary.effectiveAnnualVol}%（ρ 由 0 变为真实值）`);
