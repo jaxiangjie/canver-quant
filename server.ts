@@ -741,8 +741,20 @@ async function startServer() {
     });
   }
 
-  app.listen(port, '0.0.0.0', () => {
+  const httpServer = app.listen(port, '0.0.0.0', () => {
     console.log(`Carver A-Share Portfolio Server listening on http://0.0.0.0:${port}`);
+  });
+  // 单实例友好退出（2026-10-29）：端口被占用通常意味着已有一个工作台实例在跑。
+  // 没有 error handler 时，未捕获的 'error' 事件会让进程崩溃并甩出一屏 EADDRINUSE stack，
+  // 用户会误以为“界面崩了”。这里改为明确提示后正常退出。
+  httpServer.on('error', (err: NodeJS.ErrnoException) => {
+    if (err.code === 'EADDRINUSE') {
+      console.error(`[server] 端口 ${port} 已被占用 —— 很可能已有一个工作台在运行。`);
+      console.error(`[server] 直接访问 http://localhost:${port} 即可；如需重启，请先关闭旧窗口。`);
+      process.exit(0);
+    }
+    console.error('[server] listen 失败:', err);
+    process.exit(1);
   });
 
   // 启动后自动同步一次实时快照（市价 + 估值双通道互验）：

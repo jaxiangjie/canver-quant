@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "updatedAt": "2026-10-14T14:06:19.663Z",
+  "updatedAt": "2026-11-17T13:10:54.010Z",
   "entries": [
     {
       "code": "562500",
@@ -8,7 +8,7 @@
       "category": "broad_etf",
       "isETF": true,
       "riskBudgetWeight": 0.05,
-      "hfqToMarketFactor": 1,
+      "hfqToMarketFactor": 0.964286,
       "addedAt": "2026-10-14T10:54:51.584Z",
       "source": "tencent_hfq"
     },
@@ -18,7 +18,7 @@
       "category": "broad_etf",
       "isETF": true,
       "riskBudgetWeight": 0.05,
-      "hfqToMarketFactor": 1,
+      "hfqToMarketFactor": 0.977551,
       "addedAt": "2026-10-14T14:06:19.663Z",
       "source": "tencent_hfq"
     }

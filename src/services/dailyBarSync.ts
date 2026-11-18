@@ -228,8 +228,13 @@ async function syncOne(inst: AShareInstrument): Promise<BarSyncItem> {
   if (!bars.length) return { ...base, appended: 0, status: 'failed', reason: 'no bars（无本地日线，需先入池）' };
 
   let fresh: StagingBar[];
+  // 闸门日期同时用作：① 腾讯请求的 end 槽（防「实时模式」当天 hfq 未定稿）
+  // ② fresh 裁剪上限（双保险：即便接口返回了未收盘的当天 bar，也不写盘）
+  const gateDate = latestClosedTradingDay();
   try {
-    fresh = await fetchTencentHfqDaily(bare, 1280, base.beforeLast);
+    fresh = (await fetchTencentHfqDaily(bare, 1280, base.beforeLast, gateDate)).filter(
+      (b) => b.tradeDate <= gateDate,
+    );
   } catch (e: any) {
     return { ...base, appended: 0, status: 'failed', reason: `腾讯拉取失败：${e?.message || e}` };
   }

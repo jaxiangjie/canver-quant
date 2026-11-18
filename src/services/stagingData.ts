@@ -103,6 +103,26 @@ function ensureDirs(target: StagingTarget): string {
  * >640 根的股票最多 2 次请求只拿到 ~640 根（"全历史"是装饰）。现在游标放第四槽，
  * 并断言第 2 页起必须引入严格更早的新日期，否则抛错——协议错配必须炸响。
  */
+/**
+ * 最近一个「已收盘」的工作日（北京时间 15:00 为界，周末回退）。
+ *
+ * ⚠️ 与 `dailyBarSync.latestClosedTradingDay` 语义完全相同，此处重复实现是为了
+ * 避免 stagingData → dailyBarSync 的反向依赖（后者已 import 前者）。
+ * 两处必须保持同步，改动时一起改。
+ */
+function defaultSettledEndDate(now: Date = new Date()): string {
+  const bj = new Date(now.getTime() + 8 * 3_600_000);
+  const today = new Date(Date.UTC(bj.getUTCFullYear(), bj.getUTCMonth(), bj.getUTCDate()));
+  const minuteOfDay = bj.getUTCHours() * 60 + bj.getUTCMinutes();
+  const dow = today.getUTCDay();
+  let d = today;
+  if (!(dow !== 0 && dow !== 6 && minuteOfDay >= 15 * 60)) {
+    d = new Date(today.getTime() - 86_400_000);
+    while (d.getUTCDay() === 0 || d.getUTCDay() === 6) d = new Date(d.getTime() - 86_400_000);
+  }
+  return d.toISOString().slice(0, 10);
+}
+
 export async function fetchTencentHfqDaily(
   code: string,
   maxBars = 12000,
@@ -111,10 +131,22 @@ export async function fetchTencentHfqDaily(
    * 日线增量同步只需覆盖 parquet 尾部之后的缺口，避免为 3-4 根新 bar 拉全历史。
    */
   stopAtOrBefore?: string,
+  /**
+   * 首屏的 end 槽（YYYY-MM-DD）。
+   *
+   * 🔴 绝不允许留空（2026-11-17 实测事故）：end 槽留空 = 腾讯「实时快照模式」，
+   * 当天那根 bar 的 hfq 复权基准**尚未定稿**，返回的是未定稿值 ——
+   * 601318 实测 11-17 返回 128.45，而正确值 158.23（差 −19%）。
+   * 该值被 `stitchByReturns` 当作「真实收益率」写进 parquet →
+   * 每次盘中/收盘后立即同步，就把当天的假暴跌固化一根，且不可逆
+   * （中国平安 6 次同步累计 −75%、紫金矿业 +99%、国债 ETF −13%）。
+   * 带上明确的 end 日期后，腾讯走历史查询模式，返回与历史同基准的定稿值。
+   */
+  initialEndDate: string = defaultSettledEndDate(),
 ): Promise<StagingBar[]> {
   const symbol = codeToTencentSymbol(code);
   const collected = new Map<string, StagingBar>();
-  let endDate = '';
+  let endDate = initialEndDate;
   const PAGE = 640;
 
   for (let page = 0; page < Math.ceil(maxBars / PAGE); page++) {
