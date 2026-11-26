@@ -14,18 +14,18 @@ export const SELECT_ETF5_ID = 'select_etf5';
 export const DEFAULT_BUNDLES: InstrumentBundle[] = [
   {
     id: BALANCED9_ID,
-    name: '均衡 ETF 9 腿',
-    description: '全天候大类资产配置：宽基/红利/国债/黄金/纳指/日经225（恒科已换为日经225，更低相关性与更长样本）',
+    name: '核心 9 腿（股债金）',
+    description: '2026-11-26 定稿：红利/十年国债/美的/中远/神华/纳指/黄金/牧原/鱼跃，等权 1/9；债券腿受 maxBondCap 20% 上限约束。近8年卡弗年化约18.8%/夏普1.30/回撤-11.2%，全样本约13.5%/0.98/-17.1%（100万，18%目标波动，含全部摩擦成本）',
     items: [
-      { id: '510300', riskBudgetWeight: 0.15 },
-      { id: '510500', riskBudgetWeight: 0.15 },
-      { id: '588000', riskBudgetWeight: 0.10 },
-      { id: '512890', riskBudgetWeight: 0.15 },
-      { id: '601857', riskBudgetWeight: 0.10 },
-      { id: '511010', riskBudgetWeight: 0.15 },
-      { id: '518880', riskBudgetWeight: 0.10 },
-      { id: '513100', riskBudgetWeight: 0.10 },
-      { id: '513520', riskBudgetWeight: 0.10 }, // 日经225ETF，替换 513180 恒生科技
+      { id: '512890', riskBudgetWeight: 1 / 9 }, // 红利低波 ETF
+      { id: '511260', riskBudgetWeight: 1 / 9 }, // 十年国债 ETF（2026-11-26 晋升入池；引擎 maxBondCap=20% 自动限仓）
+      { id: '000333', riskBudgetWeight: 1 / 9 }, // 美的集团
+      { id: '601919', riskBudgetWeight: 1 / 9 }, // 中远海控
+      { id: '601088', riskBudgetWeight: 1 / 9 }, // 中国神华
+      { id: '513100', riskBudgetWeight: 1 / 9 }, // 纳指 ETF
+      { id: '518880', riskBudgetWeight: 1 / 9 }, // 黄金 ETF
+      { id: '002714', riskBudgetWeight: 1 / 9 }, // 牧原股份
+      { id: '002223', riskBudgetWeight: 1 / 9 }, // 鱼跃医疗
     ],
   },
   {

@@ -30,22 +30,37 @@ import { DEFAULT_BUNDLES, BALANCED9_ID, resolveUniverseDetailed, InstrumentBundl
 import { IMPORTED_BUNDLE_ID } from './services/customPortfolioStore';
 import { BundleSelector } from './components/BundleSelector';
 
-const BUNDLES_KEY = 'canver.bundles.v1';
-const ACTIVE_KEY = 'canver.activeBundle.v1';
+// 2026-11-26：内置 balanced9 组合成分整体更换（旧9腿ETF → 新9腿股债金）。
+// v1 → v2 让存量浏览器以代码内 DEFAULT_BUNDLES 为准，但**必须迁移 v1 里的自定义/导入组合**
+// ——否则用户自建的组合会随升 key 一起消失。策略：内置 id 用代码定义强制覆盖，其余原样保留。
+const BUNDLES_KEY = 'canver.bundles.v2';
+const ACTIVE_KEY = 'canver.activeBundle.v2';
+const LEGACY_BUNDLES_KEY = 'canver.bundles.v1';
+const LEGACY_ACTIVE_KEY = 'canver.activeBundle.v1';
+
+function mergeWithDefaults(stored: InstrumentBundle[]): InstrumentBundle[] {
+  const builtinIds = new Set(DEFAULT_BUNDLES.map((b) => b.id));
+  // 内置组合：一律用代码定义（含新成分/名称/权重），不让 localStorage 旧定义遮蔽。
+  // 非内置（自定义 + imported 槽位）：原样保留，保留用户数据与顺序。
+  const customs = stored.filter((b) => !builtinIds.has(b.id));
+  return [...DEFAULT_BUNDLES, ...customs];
+}
+
 function loadBundles(): InstrumentBundle[] {
   try {
+    // v2 已有数据：正常合并（内置覆盖 + 自定义保留）
     const s = localStorage.getItem(BUNDLES_KEY);
-    if (s) {
-      const stored = JSON.parse(s) as InstrumentBundle[];
-      // 保证新增的内置 bundle 始终能被合并识别
-      const existingIds = new Set(stored.map((b) => b.id));
-      const merged = [...stored];
-      for (const def of DEFAULT_BUNDLES) {
-        if (!existingIds.has(def.id)) {
-          merged.push(def);
-        }
-      }
-      return merged;
+    if (s) return mergeWithDefaults(JSON.parse(s) as InstrumentBundle[]);
+
+    // v2 不存在：从 v1 迁移一次（用户升级前的所有自定义/导入组合都在 v1）
+    const legacy = localStorage.getItem(LEGACY_BUNDLES_KEY);
+    if (legacy) {
+      const migrated = mergeWithDefaults(JSON.parse(legacy) as InstrumentBundle[]);
+      localStorage.setItem(BUNDLES_KEY, JSON.stringify(migrated));
+      // 迁移激活 id：v1 的激活值同样有效（id 不变，只是换了 storage key）
+      const legacyActive = localStorage.getItem(LEGACY_ACTIVE_KEY);
+      if (legacyActive) localStorage.setItem(ACTIVE_KEY, legacyActive);
+      return migrated;
     }
   } catch {
     /* ignore */

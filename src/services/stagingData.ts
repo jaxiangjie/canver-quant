@@ -607,12 +607,17 @@ export async function promoteFromStaging(
 
 /** realData 用：把 registry 条目转成与 mockData 模板同构的元数据模板 */
 export function registryToTemplates(entries: PoolRegistryEntry[]): AShareInstrument[] {
+  // 2026-11-26：原写死 isT0:false 会把晋升入池的国债/商品/QDII ETF 错标成 T+1，
+  // 导致标量为负时误报 CAUTION_T1、UI 显示错误（mockData 里这些类别均为 T+0）。
+  // 按 category 推导，与 AddInstrumentModal / mockData 口径一致。
+  const T0_CATEGORIES = new Set(['bond_etf', 'commodity_etf', 'qdii_etf']);
   return entries.map((e) => ({
     id: e.code,
     code: e.code + (e.code[0] === '6' || e.code[0] === '5' ? '.SH' : '.SZ'),
     name: e.name,
     category: e.category as AShareInstrument['category'],
     isETF: e.isETF,
+    isT0: T0_CATEGORIES.has(e.category),
     stampDutyExempt: e.isETF,
     currentShares: 0,
     riskBudgetWeight: e.riskBudgetWeight,
@@ -629,7 +634,6 @@ export function registryToTemplates(entries: PoolRegistryEntry[]): AShareInstrum
     notes: '',
     dataSource: 'fallback',
     syntheticBars: true,
-    isT0: false,
     bars: [],
   }));
 }

@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "updatedAt": "2026-11-17T13:10:54.010Z",
+  "updatedAt": "2026-11-26T01:18:34.869Z",
   "entries": [
     {
       "code": "562500",
@@ -20,6 +20,16 @@
       "riskBudgetWeight": 0.05,
       "hfqToMarketFactor": 0.977551,
       "addedAt": "2026-10-14T14:06:19.663Z",
+      "source": "tencent_hfq"
+    },
+    {
+      "code": "511260",
+      "name": "十年国债ETF",
+      "category": "bond_etf",
+      "isETF": true,
+      "riskBudgetWeight": 0.05,
+      "hfqToMarketFactor": 0.961858,
+      "addedAt": "2026-11-26T01:18:34.865Z",
       "source": "tencent_hfq"
     }
   ]
